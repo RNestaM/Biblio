@@ -379,7 +379,7 @@
       </div>
 
       <div class="tab-panel" id="tab-incomplete">
-        <p class="hint">Livres marqués "Non identifié" (scannés sans qu'aucune source n'ait trouvé d'infos). Copie l'ISBN pour le chercher toi-même ailleurs, ou complète directement ici.</p>
+        <p class="hint">Livres marqués "Non identifié" ou "Titre inconnu" (scannés ou importés sans qu'aucune source n'ait trouvé d'infos). Copie l'ISBN pour le chercher toi-même ailleurs, ou complète directement ici.</p>
         <div id="incompleteList"></div>
       </div>
 
@@ -437,7 +437,7 @@ try {
   document.getElementById('configBanner').style.display = 'block';
 }
 
-const APP_VERSION = 24; // Incrémenté à chaque livraison pendant la phase de dev
+const APP_VERSION = 25; // Incrémenté à chaque livraison pendant la phase de dev
 document.getElementById('versionTag').textContent = 'V' + APP_VERSION;
 
 const BOOKS_COL = 'books';
@@ -1541,7 +1541,7 @@ function resizeImageToDataUrl(file, maxWidth, quality){
 function renderIncompleteList(){
   const el = document.getElementById('incompleteList');
   if (!el) return; // pas encore dans le DOM au tout premier chargement
-  const incomplete = allBooks.filter(b => b.title && b.title.startsWith('Non identifié'));
+  const incomplete = allBooks.filter(b => b.title && (b.title.startsWith('Non identifié') || b.title === 'Titre inconnu'));
   if (!incomplete.length){
     el.innerHTML = '<p class="hint">Aucun livre non identifié. 🎉</p>';
     return;
