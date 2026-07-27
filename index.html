@@ -414,7 +414,7 @@ try {
   document.getElementById('configBanner').style.display = 'block';
 }
 
-const APP_VERSION = 17; // Incrémenté à chaque livraison pendant la phase de dev
+const APP_VERSION = 18; // Incrémenté à chaque livraison pendant la phase de dev
 document.getElementById('versionTag').textContent = 'V' + APP_VERSION;
 
 const BOOKS_COL = 'books';
@@ -546,20 +546,80 @@ async function fetchFromOpenLibraryByIsbn(isbn){
     };
   } catch(e){ console.error(e); return null; }
 }
+/* BnF (Bibliothèque nationale de France) : API SRU publique, sans clé.
+   Souvent meilleure couverture que Google/Open Library sur les petits
+   éditeurs et livres jeunesse français. Réponse en XML (Dublin Core) plutôt
+   que JSON, et pas de couverture disponible via cette API. Le support CORS
+   n'est pas garanti par cette institution (pensée pour un usage serveur à
+   l'origine) : si le navigateur bloque la requête, l'erreur est simplement
+   avalée et on passe au repli suivant (comportement volontairement silencieux
+   ici, contrairement à Google Books, car cette source est un bonus et pas le
+   service principal). */
+function parseBnfDublinCoreRecords(xmlText){
+  try {
+    const xml = new DOMParser().parseFromString(xmlText, 'text/xml');
+    if (xml.querySelector('parsererror')) return [];
+    const records = Array.from(xml.getElementsByTagName('srw:record'));
+    return records.map(rec => {
+      const titleEl = rec.getElementsByTagName('dc:title')[0];
+      const creatorEls = Array.from(rec.getElementsByTagName('dc:creator'));
+      const identifierEls = Array.from(rec.getElementsByTagName('dc:identifier'));
+      if (!titleEl || !titleEl.textContent.trim()) return null;
+      const title = titleEl.textContent.trim();
+      const author = creatorEls.map(el => el.textContent.trim()).filter(Boolean).join(', ');
+      let isbn = '';
+      for (const idEl of identifierEls){
+        const txt = idEl.textContent || '';
+        const match = txt.match(/(97[89][\d\-]{10,17}|\d{9}[\dXx])/);
+        if (match) { isbn = match[0].replace(/-/g, ''); break; }
+      }
+      return { isbn, title, author, cover: '' };
+    }).filter(Boolean);
+  } catch(e){ console.error('Erreur de lecture XML BnF:', e); return []; }
+}
+async function fetchFromBnfByIsbn(isbn){
+  try {
+    const query = `bib.isbn adj "${isbn}"`;
+    const url = `https://catalogue.bnf.fr/api/SRU?version=1.2&operation=searchRetrieve&query=${encodeURIComponent(query)}&recordSchema=dublincore&maximumRecords=1`;
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const text = await res.text();
+    const results = parseBnfDublinCoreRecords(text);
+    return results.length ? results[0] : null;
+  } catch(e){ console.warn('BnF indisponible (CORS ou réseau) :', e); return null; }
+}
+async function searchBnfByTitleAuthor(title, author){
+  try {
+    const clauses = [];
+    if (title) clauses.push(`(bib.title all "${title.replace(/"/g, '')}")`);
+    if (author) clauses.push(`(bib.author all "${author.replace(/"/g, '')}")`);
+    if (!clauses.length) return [];
+    const query = clauses.join(' and ');
+    const url = `https://catalogue.bnf.fr/api/SRU?version=1.2&operation=searchRetrieve&query=${encodeURIComponent(query)}&recordSchema=dublincore&maximumRecords=10`;
+    const res = await fetch(url);
+    if (!res.ok) return [];
+    const text = await res.text();
+    return parseBnfDublinCoreRecords(text);
+  } catch(e){ console.warn('BnF indisponible (CORS ou réseau) :', e); return []; }
+}
 /* Retourne soit un livre { isbn, title, author, cover }, soit null (rien trouvé),
    soit { apiError: true, status, detail } si Google Books a répondu une erreur
    (429, 403, etc.) — utile pour afficher le vrai problème plutôt que
    "livre introuvable". */
 async function fetchBookByIsbn(isbn){
-  // Google Books en premier (bonne couverture générale), Open Library en repli
-  // (couverture souvent meilleure sur les éditions françaises/petits éditeurs)
+  // Ordre : Google Books (bonne couverture générale) → Open Library (bon sur
+  // le français) → BnF (encore meilleur sur le français/jeunesse, en dernier
+  // recours car XML et pas de couverture image)
   let info = await fetchFromGoogleBooksByIsbn(isbn);
   if (info && info.apiError){
     const olInfo = await fetchFromOpenLibraryByIsbn(isbn);
     if (olInfo) return { isbn, title: olInfo.title || 'Titre inconnu', author: olInfo.author || 'Auteur inconnu', cover: olInfo.cover || '' };
+    const bnfInfo = await fetchFromBnfByIsbn(isbn);
+    if (bnfInfo) return { isbn, title: bnfInfo.title || 'Titre inconnu', author: bnfInfo.author || 'Auteur inconnu', cover: '' };
     return info; // on remonte l'erreur telle quelle (status + detail)
   }
   if (!info) info = await fetchFromOpenLibraryByIsbn(isbn);
+  if (!info) info = await fetchFromBnfByIsbn(isbn);
   if (!info) return null;
   return {
     isbn,
@@ -1103,9 +1163,15 @@ document.getElementById('titleSearchBtn').addEventListener('click', async ()=>{
       renderResultsList(resultsEl, olResults);
       return;
     }
+    // Dernier repli : BnF (bon sur les éditions françaises)
+    const bnfResults = await searchBnfByTitleAuthor(title, author);
+    if (bnfResults.length){
+      renderResultsList(resultsEl, bnfResults);
+      return;
+    }
     const message = googleFailed
-      ? `Erreur lors de la recherche (Google Books : ${googleErrorDetail}). Open Library n'a rien trouvé non plus.`
-      : `Aucun résultat.`;
+      ? `Erreur lors de la recherche (Google Books : ${googleErrorDetail}). Open Library et la BnF n'ont rien trouvé non plus.`
+      : `Aucun résultat (Google Books, Open Library et BnF interrogés).`;
     renderManualFallback(resultsEl, '', title, author, message);
     return;
   }
