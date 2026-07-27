@@ -379,7 +379,7 @@
       </div>
 
       <div class="tab-panel" id="tab-incomplete">
-        <p class="hint">Livres dont le titre ou l'auteur n'a pas pu être identifié automatiquement. Copie l'ISBN pour le chercher toi-même ailleurs, ou complète directement ici (tu peux aussi ajouter une couverture si tu veux, mais ce n'est pas ce qui te fait apparaître dans cette liste).</p>
+        <p class="hint">Livres marqués "Non identifié" (scannés sans qu'aucune source n'ait trouvé d'infos). Copie l'ISBN pour le chercher toi-même ailleurs, ou complète directement ici.</p>
         <div id="incompleteList"></div>
       </div>
 
@@ -437,7 +437,7 @@ try {
   document.getElementById('configBanner').style.display = 'block';
 }
 
-const APP_VERSION = 23; // Incrémenté à chaque livraison pendant la phase de dev
+const APP_VERSION = 24; // Incrémenté à chaque livraison pendant la phase de dev
 document.getElementById('versionTag').textContent = 'V' + APP_VERSION;
 
 const BOOKS_COL = 'books';
@@ -1541,11 +1541,9 @@ function resizeImageToDataUrl(file, maxWidth, quality){
 function renderIncompleteList(){
   const el = document.getElementById('incompleteList');
   if (!el) return; // pas encore dans le DOM au tout premier chargement
-  const incomplete = allBooks.filter(b =>
-    !b.author || b.author === 'Auteur inconnu' || !b.title || b.title === 'Titre inconnu'
-  );
+  const incomplete = allBooks.filter(b => b.title && b.title.startsWith('Non identifié'));
   if (!incomplete.length){
-    el.innerHTML = '<p class="hint">Tous tes livres ont un titre et un auteur identifiés. 🎉</p>';
+    el.innerHTML = '<p class="hint">Aucun livre non identifié. 🎉</p>';
     return;
   }
   el.innerHTML = '';
