@@ -414,7 +414,7 @@ try {
   document.getElementById('configBanner').style.display = 'block';
 }
 
-const APP_VERSION = 15; // Incrémenté à chaque livraison pendant la phase de dev
+const APP_VERSION = 16; // Incrémenté à chaque livraison pendant la phase de dev
 document.getElementById('versionTag').textContent = 'V' + APP_VERSION;
 
 const BOOKS_COL = 'books';
@@ -504,12 +504,13 @@ const GOOGLE_BOOKS_API_KEY = 'AIzaSyCNnRRrP3hlXGII_TxNieb5SlzjLLpti0Y';
 async function fetchFromGoogleBooksByIsbn(isbn, isRetry){
   try {
     const res = await fetch(`https://www.googleapis.com/books/v1/volumes?q=isbn:${isbn}&key=${GOOGLE_BOOKS_API_KEY}`);
-    if (res.status === 429){
+    if (res.status === 429 || res.status >= 500){
       if (!isRetry){
         await new Promise(r => setTimeout(r, 1500));
         return fetchFromGoogleBooksByIsbn(isbn, true);
       }
-      return { apiError: true, status: 429, detail: 'Trop de requêtes (429)' };
+      const label = res.status === 429 ? 'Trop de requêtes (429)' : `Service Google Books temporairement indisponible (${res.status})`;
+      return { apiError: true, status: res.status, detail: label };
     }
     if (!res.ok) {
       const bodyText = await res.text().catch(()=> '');
@@ -567,13 +568,17 @@ async function fetchBookByIsbn(isbn){
     cover: info.cover || ''
   };
 }
-async function searchBooksByTitleAuthor(title, author){
+async function searchBooksByTitleAuthor(title, author, isRetry){
   const parts = [];
   if (title) parts.push(`intitle:${title}`);
   if (author) parts.push(`inauthor:${author}`);
   const q = parts.join(' ');
   const res = await fetch(`https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(q)}&maxResults=10&key=${GOOGLE_BOOKS_API_KEY}`);
   if (!res.ok){
+    if ((res.status === 429 || res.status >= 500) && !isRetry){
+      await new Promise(r => setTimeout(r, 1500));
+      return searchBooksByTitleAuthor(title, author, true);
+    }
     const bodyText = await res.text().catch(()=> '');
     const err = new Error(`Google Books a répondu avec le statut ${res.status}`);
     err.status = res.status;
