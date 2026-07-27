@@ -12,8 +12,8 @@
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 
-<!-- Scanner de code-barres -->
-<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<!-- Scanner de code-barres (ZXing : bon support des codes-barres 1D type EAN-13, toutes navigateurs) -->
+<script src="https://unpkg.com/@zxing/library/umd/index.min.js"></script>
 
 <style>
   :root{
@@ -395,7 +395,7 @@ try {
   document.getElementById('configBanner').style.display = 'block';
 }
 
-const APP_VERSION = 7; // Incrémenté à chaque livraison pendant la phase de dev
+const APP_VERSION = 8; // Incrémenté à chaque livraison pendant la phase de dev
 document.getElementById('versionTag').textContent = 'V' + APP_VERSION;
 
 const BOOKS_COL = 'books';
@@ -507,12 +507,12 @@ async function searchBooksByTitle(title){
 
 /* ---------- Scanner de codes-barres ---------- */
 /* Deux moteurs de détection, du plus fiable au moins fiable :
-   1) BarcodeDetector natif du navigateur (Chrome/Edge Android notamment) :
-      détection très fiable pour les codes-barres 1D (EAN-13) via un
-      algorithme intégré au navigateur, bien plus performant que le moteur
-      JS pur ci-dessous pour ce type de code.
-   2) html5-qrcode (moteur JS) : utilisé en repli si le navigateur ne
-      propose pas de BarcodeDetector natif (ex. Safari/iOS, Firefox). */
+   1) BarcodeDetector natif du navigateur (Chrome/Edge notamment) : détection
+      très rapide et fiable pour les codes-barres 1D (EAN-13), non disponible
+      sur Firefox ni Safari.
+   2) ZXing (bibliothèque JS, tous navigateurs) : utilisée en repli quand le
+      navigateur ne propose pas de BarcodeDetector natif. Plus robuste que le
+      moteur de détection intégré à html5-qrcode pour les codes 1D. */
 const BARCODE_FORMATS_NATIVE = ['ean_13','ean_8','upc_a','upc_e','code_128'];
 
 async function nativeBarcodeSupport(){
@@ -535,8 +535,8 @@ const CAMERA_CONSTRAINTS = {
   height: { ideal: 1080 }
 };
 
-/* Moteur natif : ouvre la caméra manuellement (sans html5-qrcode) et appelle
-   detect() sur chaque frame vidéo via requestAnimationFrame. */
+/* Moteur natif : ouvre la caméra manuellement et appelle detect() sur chaque
+   frame vidéo via requestAnimationFrame. */
 function createNativeScanner(containerEl, onDecode, onFatalError){
   let stream = null, video = null, rafId = null, stopped = false, detector = null;
 
@@ -594,74 +594,102 @@ function createNativeScanner(containerEl, onDecode, onFatalError){
   return { start, stop };
 }
 
-/* Moteur de repli (html5-qrcode, JS pur) */
-function getScannerConfig(){
-  return {
-    fps: 15,
-    qrbox: function(viewfinderWidth, viewfinderHeight){
-      const minEdge = Math.min(viewfinderWidth, viewfinderHeight);
-      const boxWidth = Math.floor(Math.min(viewfinderWidth * 0.85, minEdge * 1.7));
-      const boxHeight = Math.floor(boxWidth * 0.42);
-      return { width: boxWidth, height: boxHeight };
-    },
-    formatsToSupport: [
-      Html5QrcodeSupportedFormats.EAN_13,
-      Html5QrcodeSupportedFormats.EAN_8,
-      Html5QrcodeSupportedFormats.UPC_A,
-      Html5QrcodeSupportedFormats.UPC_E,
-      Html5QrcodeSupportedFormats.CODE_128
-    ]
-  };
-}
-async function startJsScanner(containerEl, onDecode, onGiveUp){
-  const config = getScannerConfig();
-  const onSuccess = (decodedText)=>{ onDecode(decodedText); };
-  let instance = new Html5Qrcode(containerEl.id);
-  try {
-    await instance.start(CAMERA_CONSTRAINTS, config, onSuccess);
-  } catch(err){
-    console.error('Échec ouverture caméra (contraintes HD), repli sur config simple:', err);
+/* Moteur de repli : ZXing (fonctionne sur Firefox, Safari, tous navigateurs) */
+function createZxingScanner(containerEl, onDecode, onFatalError){
+  const hints = new Map();
+  hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
+    ZXing.BarcodeFormat.EAN_13,
+    ZXing.BarcodeFormat.EAN_8,
+    ZXing.BarcodeFormat.UPC_A,
+    ZXing.BarcodeFormat.UPC_E,
+    ZXing.BarcodeFormat.CODE_128
+  ]);
+  hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+  const reader = new ZXing.BrowserMultiFormatReader(hints);
+  let stopped = false, controls = null;
+
+  const video = document.createElement('video');
+  video.setAttribute('playsinline', 'true');
+  video.muted = true;
+  video.style.width = '100%';
+  video.style.display = 'block';
+  video.style.borderRadius = '8px';
+  containerEl.appendChild(video);
+
+  async function start(){
     try {
-      containerEl.innerHTML = '';
-      instance = new Html5Qrcode(containerEl.id);
-      await instance.start({ facingMode: 'environment' }, config, onSuccess);
-    } catch(err2){
-      console.error('Échec ouverture caméra:', err2);
-      onGiveUp();
-      return null;
+      controls = await reader.decodeFromConstraints(
+        { video: CAMERA_CONSTRAINTS },
+        video,
+        (result, err)=>{
+          if (stopped || !result) return;
+          const value = result.getText();
+          stop();
+          onDecode(value);
+        }
+      );
+    } catch(e){
+      // repli sur des contraintes caméra plus simples si le premier essai échoue
+      try {
+        controls = await reader.decodeFromConstraints(
+          { video: { facingMode: 'environment' } },
+          video,
+          (result, err)=>{
+            if (stopped || !result) return;
+            const value = result.getText();
+            stop();
+            onDecode(value);
+          }
+        );
+      } catch(e2){ onFatalError(e2); }
     }
   }
-  return instance;
+  function stop(){
+    if (stopped) return;
+    stopped = true;
+    try { reader.reset(); } catch(e){}
+    if (controls && controls.stop) controls.stop();
+    containerEl.innerHTML = '';
+    containerEl.style.display = 'none';
+  }
+  return { start, stop };
 }
 
 /* Point d'entrée commun aux deux scanners de l'app (onglet "Ajouter (scan)"
    et bouton de recherche). Choisit le meilleur moteur disponible. */
+let currentScannerControl = null;
 async function openBarcodeScanner(containerEl, onDecode){
   containerEl.style.display = 'block';
   containerEl.innerHTML = '';
 
   const useNative = await nativeBarcodeSupport();
-  if (useNative){
-    const scanner = createNativeScanner(containerEl,
-      (value)=>{ onDecode(value); },
-      (err)=>{
-        console.error('Scanner natif indisponible, repli JS:', err);
-        containerEl.innerHTML = '';
-        startJsScanner(containerEl,
-          (value)=>{ onDecode(value); currentScannerControl = null; },
-          ()=>{ showToast("Impossible d'accéder à la caméra"); containerEl.style.display = 'none'; }
-        ).then(instance=>{ currentScannerControl = instance ? { stop: ()=>instance.stop().then(()=>instance.clear()).catch(()=>{}) } : null; });
+  const engine = useNative ? createNativeScanner : createZxingScanner;
+  const otherEngine = useNative ? createZxingScanner : null;
+
+  const scanner = engine(containerEl,
+    (value)=>{ currentScannerControl = null; onDecode(value); },
+    (err)=>{
+      console.error('Échec moteur principal, repli:', err);
+      containerEl.innerHTML = '';
+      if (otherEngine){
+        const fallback = otherEngine(containerEl,
+          (value)=>{ currentScannerControl = null; onDecode(value); },
+          (err2)=>{
+            console.error('Échec ouverture caméra:', err2);
+            showToast("Impossible d'accéder à la caméra");
+            containerEl.style.display = 'none';
+          }
+        );
+        currentScannerControl = fallback;
+        fallback.start();
+      } else {
+        showToast("Impossible d'accéder à la caméra");
+        containerEl.style.display = 'none';
       }
-    );
-    currentScannerControl = scanner;
-    scanner.start();
-  } else {
-    const instance = await startJsScanner(containerEl,
-      (value)=>{ onDecode(value); currentScannerControl = null; },
-      ()=>{ showToast("Impossible d'accéder à la caméra"); containerEl.style.display = 'none'; }
-    );
-    currentScannerControl = instance ? { stop: ()=>instance.stop().then(()=>instance.clear()).catch(()=>{}) } : null;
-  }
+    }
+  );
+  currentScannerControl = scanner;
+  scanner.start();
 }
 function closeBarcodeScanner(containerEl){
   if (currentScannerControl){
@@ -671,8 +699,6 @@ function closeBarcodeScanner(containerEl){
   containerEl.style.display = 'none';
   containerEl.innerHTML = '';
 }
-
-let currentScannerControl = null;
 
 function startScanner(onDecode){
   const readerEl = document.getElementById('reader');
