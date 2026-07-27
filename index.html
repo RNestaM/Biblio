@@ -340,10 +340,17 @@
         <button class="btn btn-brass" id="csvImportBtn">Importer</button>
         <p class="hint" id="csvImportSummary" style="margin-top:10px;"></p>
         <div id="csvImportLog" style="max-height:280px; overflow-y:auto; margin-top:6px;"></div>
+
+        <div style="border-top:1px solid var(--line); margin:22px 0 16px; padding-top:16px;">
+          <h3 style="font-size:15px; margin-bottom:8px;">Exporter</h3>
+          <p class="hint">Télécharge un fichier CSV de tous les livres de ta bibliothèque (utile comme sauvegarde).</p>
+          <button class="btn btn-outline" id="csvExportBtn">Exporter en CSV</button>
+        </div>
       </div>
 
       <div class="tab-panel" id="tab-list">
         <p class="hint">Appuie sur « Supprimer » pour retirer un livre de la bibliothèque.</p>
+        <button class="btn btn-danger-outline" id="deleteAllBtn" style="margin-bottom:14px;">Vider toute la bibliothèque</button>
         <div id="manageList"></div>
       </div>
 
@@ -395,7 +402,7 @@ try {
   document.getElementById('configBanner').style.display = 'block';
 }
 
-const APP_VERSION = 9; // Incrémenté à chaque livraison pendant la phase de dev
+const APP_VERSION = 12; // Incrémenté à chaque livraison pendant la phase de dev
 document.getElementById('versionTag').textContent = 'V' + APP_VERSION;
 
 const BOOKS_COL = 'books';
@@ -477,9 +484,22 @@ function renderEmpty(msg){
 document.getElementById('searchInput').addEventListener('input', (e)=> render(e.target.value));
 
 /* ---------- Recherche de métadonnées (Google Books, avec repli Open Library) ---------- */
-async function fetchFromGoogleBooksByIsbn(isbn){
+/* Clé API Google Books : restreinte au site rnestam.github.io et à la Books API
+   uniquement (configurée dans Google Cloud Console). Sans elle, le quota gratuit
+   anonyme est très bas et se fait vite bloquer (erreurs 429). */
+const GOOGLE_BOOKS_API_KEY = 'AIzaSyCNnRRrP3hlXGII_TxNieb5SlzjLLpti0Y';
+
+async function fetchFromGoogleBooksByIsbn(isbn, isRetry){
   try {
-    const res = await fetch(`https://www.googleapis.com/books/v1/volumes?q=isbn:${isbn}`);
+    const res = await fetch(`https://www.googleapis.com/books/v1/volumes?q=isbn:${isbn}&key=${GOOGLE_BOOKS_API_KEY}`);
+    if (res.status === 429){
+      if (!isRetry){
+        await new Promise(r => setTimeout(r, 1500));
+        return fetchFromGoogleBooksByIsbn(isbn, true);
+      }
+      return { rateLimited: true };
+    }
+    if (!res.ok) { console.warn('Google Books a répondu avec le statut', res.status); return null; }
     const data = await res.json();
     if (!data.items || !data.items.length) return null;
     const info = data.items[0].volumeInfo;
@@ -495,6 +515,7 @@ async function fetchFromGoogleBooksByIsbn(isbn){
 async function fetchFromOpenLibraryByIsbn(isbn){
   try {
     const res = await fetch(`https://openlibrary.org/api/books?bibkeys=ISBN:${isbn}&format=json&jscmd=data`);
+    if (!res.ok) { console.warn('Open Library a répondu avec le statut', res.status); return null; }
     const data = await res.json();
     const info = data['ISBN:' + isbn];
     if (!info || !info.title) return null;
@@ -506,10 +527,18 @@ async function fetchFromOpenLibraryByIsbn(isbn){
     };
   } catch(e){ console.error(e); return null; }
 }
+/* Retourne soit un livre { isbn, title, author, cover }, soit null (rien trouvé),
+   soit { rateLimited: true } si Google Books a temporairement bloqué les requêtes
+   (utile pour afficher un message différent de "livre introuvable"). */
 async function fetchBookByIsbn(isbn){
   // Google Books en premier (bonne couverture générale), Open Library en repli
   // (couverture souvent meilleure sur les éditions françaises/petits éditeurs)
   let info = await fetchFromGoogleBooksByIsbn(isbn);
+  if (info && info.rateLimited){
+    const olInfo = await fetchFromOpenLibraryByIsbn(isbn);
+    if (olInfo) return { isbn, title: olInfo.title || 'Titre inconnu', author: olInfo.author || 'Auteur inconnu', cover: olInfo.cover || '' };
+    return { rateLimited: true };
+  }
   if (!info) info = await fetchFromOpenLibraryByIsbn(isbn);
   if (!info) return null;
   return {
@@ -520,7 +549,7 @@ async function fetchBookByIsbn(isbn){
   };
 }
 async function searchBooksByTitle(title){
-  const res = await fetch(`https://www.googleapis.com/books/v1/volumes?q=intitle:${encodeURIComponent(title)}&maxResults=10`);
+  const res = await fetch(`https://www.googleapis.com/books/v1/volumes?q=intitle:${encodeURIComponent(title)}&maxResults=10&key=${GOOGLE_BOOKS_API_KEY}`);
   const data = await res.json();
   if (!data.items) return [];
   return data.items.map(it => {
@@ -840,6 +869,10 @@ document.getElementById('startAddScan').addEventListener('click', ()=>{
   startScanner(async (isbn)=>{
     document.getElementById('addScanResult').innerHTML = '<p class="hint">Recherche des informations…</p>';
     const info = await fetchBookByIsbn(isbn);
+    if (info && info.rateLimited) {
+      renderRateLimitedMessage(isbn);
+      return;
+    }
     if (!info) {
       renderManualAddForm(isbn);
       return;
@@ -847,6 +880,34 @@ document.getElementById('startAddScan').addEventListener('click', ()=>{
     renderAddPreview(info);
   });
 });
+function renderRateLimitedMessage(isbn){
+  document.getElementById('addScanResult').innerHTML = `
+    <p class="hint">Le service de recherche (Google Books) est temporairement limité — ce n'est pas que le livre n'existe pas. Réessaie dans quelques instants, ou ajoute-le manuellement en attendant :</p>
+    <button class="btn btn-outline" id="retryLookupBtn" style="margin-bottom:12px;">Réessayer la recherche</button>
+    <div class="field">
+      <label>Titre</label>
+      <input type="text" id="manualTitle" placeholder="Titre du livre">
+    </div>
+    <div class="field">
+      <label>Auteur</label>
+      <input type="text" id="manualAuthor" placeholder="Auteur (optionnel)">
+    </div>
+    <button class="btn btn-brass" id="manualAddBtn">Ajouter à la bibliothèque</button>`;
+  document.getElementById('retryLookupBtn').addEventListener('click', async ()=>{
+    document.getElementById('addScanResult').innerHTML = '<p class="hint">Recherche des informations…</p>';
+    const info = await fetchBookByIsbn(isbn);
+    if (info && info.rateLimited) { renderRateLimitedMessage(isbn); return; }
+    if (!info) { renderManualAddForm(isbn); return; }
+    renderAddPreview(info);
+  });
+  document.getElementById('manualAddBtn').addEventListener('click', async ()=>{
+    const title = document.getElementById('manualTitle').value.trim();
+    if (!title) return showToast('Entre au moins un titre');
+    const author = document.getElementById('manualAuthor').value.trim() || 'Auteur inconnu';
+    await addBookToLibrary({ isbn, title, author, cover: '' });
+    document.getElementById('addScanResult').innerHTML = '';
+  });
+}
 function renderManualAddForm(isbn){
   document.getElementById('addScanResult').innerHTML = `
     <p class="hint">Aucune information trouvée automatiquement pour l'ISBN ${isbn}. Ajoute-le manuellement :</p>
@@ -996,7 +1057,12 @@ document.getElementById('csvImportBtn').addEventListener('click', async ()=>{
 
     try {
       let info = await fetchBookByIsbn(isbn);
-      if (!info) info = { isbn, title: csvTitle || 'Titre inconnu', author: 'Auteur inconnu', cover: '' };
+      if (info && info.rateLimited){
+        line.textContent = `${csvTitle} — service limité, nouvelle tentative…`;
+        await new Promise(res => setTimeout(res, 4000));
+        info = await fetchBookByIsbn(isbn);
+      }
+      if (!info || info.rateLimited) info = { isbn, title: csvTitle || 'Titre inconnu', author: 'Auteur inconnu', cover: '' };
       else if (!info.title) info.title = csvTitle || info.title;
 
       await db.collection(BOOKS_COL).add({
@@ -1026,6 +1092,33 @@ document.getElementById('csvImportBtn').addEventListener('click', async ()=>{
   renderManageList();
 });
 
+/* ---------- Export CSV ---------- */
+function escapeCsvField(value){
+  const str = String(value ?? '');
+  if (/[",\n\r]/.test(str)) return '"' + str.replace(/"/g, '""') + '"';
+  return str;
+}
+document.getElementById('csvExportBtn').addEventListener('click', ()=>{
+  if (!allBooks.length) return showToast('Aucun livre à exporter');
+  const header = ['title', 'author', 'isbn', 'cover'];
+  const lines = [header.join(',')];
+  allBooks.forEach(b=>{
+    lines.push([b.title, b.author, b.isbn, b.cover].map(escapeCsvField).join(','));
+  });
+  const csvContent = '\uFEFF' + lines.join('\r\n'); // BOM pour un bon affichage des accents dans Excel
+  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  const dateStr = new Date().toISOString().slice(0, 10);
+  a.href = url;
+  a.download = `ma-bibliotheque-export-${dateStr}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  showToast(`${allBooks.length} livres exportés`);
+});
+
 /* ---------- Liste / suppression ---------- */
 function renderManageList(){
   const el = document.getElementById('manageList');
@@ -1051,6 +1144,31 @@ function renderManageList(){
     el.appendChild(row);
   });
 }
+
+/* ---------- Suppression totale ---------- */
+document.getElementById('deleteAllBtn').addEventListener('click', async ()=>{
+  if (!allBooks.length) return showToast('La bibliothèque est déjà vide');
+  const count = allBooks.length;
+  if (!confirm(`Supprimer les ${count} livres de la bibliothèque ? Cette action est irréversible.`)) return;
+  if (!confirm("Dernière confirmation : il n'y a aucun moyen de récupérer ces livres après suppression. Continuer ?")) return;
+
+  showToast('Suppression en cours…');
+  try {
+    const idsToDelete = allBooks.map(b => b.id);
+    const batchSize = 400; // Firestore limite un batch à 500 opérations
+    for (let i = 0; i < idsToDelete.length; i += batchSize){
+      const batch = db.batch();
+      idsToDelete.slice(i, i + batchSize).forEach(id => batch.delete(db.collection(BOOKS_COL).doc(id)));
+      await batch.commit();
+    }
+    showToast('Bibliothèque vidée');
+    await loadBooks();
+    renderManageList();
+  } catch(e){
+    console.error(e);
+    showToast('Erreur lors de la suppression');
+  }
+});
 
 /* ---------- Changer le mot de passe ---------- */
 document.getElementById('changePwBtn').addEventListener('click', async ()=>{
