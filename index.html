@@ -319,10 +319,12 @@
       </div>
 
       <div class="tab-panel active" id="tab-addScan">
-        <p class="hint">Scanne le code-barre (4e de couverture) d'un livre pour l'ajouter à la bibliothèque.</p>
+        <p class="hint">Scanne les codes-barres, à la suite les uns des autres. Chaque livre trouvé s'ajoute à la liste ci-dessous ; décoche ceux que tu ne veux pas garder, puis valide en une fois.</p>
         <button class="btn btn-brass" id="startAddScan">Démarrer le scan</button>
+        <button class="btn btn-outline" id="stopAddScan" style="display:none;">Arrêter le scan</button>
         <div id="reader" style="display:none;"></div>
-        <div id="addScanResult"></div>
+        <div id="scanPendingList" style="margin-top:14px;"></div>
+        <button class="btn btn-brass" id="confirmBatchAddBtn" style="display:none; margin-top:14px;">Ajouter les livres sélectionnés</button>
       </div>
 
       <div class="tab-panel" id="tab-addTitle">
@@ -352,6 +354,14 @@
         <button class="btn btn-brass" id="csvImportBtn">Importer</button>
         <p class="hint" id="csvImportSummary" style="margin-top:10px;"></p>
         <div id="csvImportLog" style="max-height:280px; overflow-y:auto; margin-top:6px;"></div>
+
+        <div style="border-top:1px solid var(--line); margin:22px 0 16px; padding-top:16px;">
+          <h3 style="font-size:15px; margin-bottom:8px;">Compléter les livres incomplets</h3>
+          <p class="hint">Relance la recherche (Google Books → Open Library → BnF) pour tous les livres ayant un ISBN mais un auteur inconnu ou pas de couverture. Utile après l'ajout de la clé API ou des nouvelles sources.</p>
+          <button class="btn btn-outline" id="enrichBtn">Rechercher les infos manquantes</button>
+          <p class="hint" id="enrichSummary" style="margin-top:10px;"></p>
+          <div id="enrichLog" style="max-height:280px; overflow-y:auto; margin-top:6px;"></div>
+        </div>
 
         <div style="border-top:1px solid var(--line); margin:22px 0 16px; padding-top:16px;">
           <h3 style="font-size:15px; margin-bottom:8px;">Exporter</h3>
@@ -414,7 +424,7 @@ try {
   document.getElementById('configBanner').style.display = 'block';
 }
 
-const APP_VERSION = 18; // Incrémenté à chaque livraison pendant la phase de dev
+const APP_VERSION = 20; // Incrémenté à chaque livraison pendant la phase de dev
 document.getElementById('versionTag').textContent = 'V' + APP_VERSION;
 
 const BOOKS_COL = 'books';
@@ -872,17 +882,6 @@ function closeBarcodeScanner(containerEl){
   containerEl.innerHTML = '';
 }
 
-function startScanner(onDecode){
-  const readerEl = document.getElementById('reader');
-  openBarcodeScanner(readerEl, (value)=>{
-    closeBarcodeScanner(readerEl);
-    onDecode(value);
-  });
-}
-function stopScanner(){
-  closeBarcodeScanner(document.getElementById('reader'));
-}
-
 /* ---------- Scan pour la recherche (bouton en haut de la barre de recherche) ---------- */
 const searchScanOverlay = document.createElement('div');
 searchScanOverlay.className = 'overlay';
@@ -976,87 +975,149 @@ document.querySelectorAll('.tab').forEach(tab=>{
   });
 });
 
-/* ---------- Ajout par scan ---------- */
+/* ---------- Ajout par scan (par lot) ---------- */
+let scanBatch = [];       // { tempId, isbn, title, author, cover, checked, loading }
+let batchScanActive = false;
+
 document.getElementById('startAddScan').addEventListener('click', ()=>{
-  document.getElementById('addScanResult').innerHTML = '';
-  startScanner(async (isbn)=>{
-    document.getElementById('addScanResult').innerHTML = '<p class="hint">Recherche des informations…</p>';
-    const info = await fetchBookByIsbn(isbn);
-    if (info && info.apiError) {
-      renderApiErrorMessage(isbn, info.detail);
-      return;
-    }
-    if (!info) {
-      renderManualAddForm(isbn);
-      return;
-    }
-    renderAddPreview(info);
-  });
+  scanBatch = [];
+  renderScanPendingList();
+  document.getElementById('startAddScan').style.display = 'none';
+  document.getElementById('stopAddScan').style.display = 'block';
+  batchScanActive = true;
+  runBatchScanLoop();
 });
-function renderApiErrorMessage(isbn, detail){
-  document.getElementById('addScanResult').innerHTML = `
-    <p class="hint">La recherche automatique a échoué — ce n'est pas que le livre n'existe pas :<br><strong>${detail || 'Erreur inconnue'}</strong></p>
-    <button class="btn btn-outline" id="retryLookupBtn" style="margin-bottom:12px;">Réessayer la recherche</button>
-    <div class="field">
-      <label>Titre</label>
-      <input type="text" id="manualTitle" placeholder="Titre du livre">
-    </div>
-    <div class="field">
-      <label>Auteur</label>
-      <input type="text" id="manualAuthor" placeholder="Auteur (optionnel)">
-    </div>
-    <button class="btn btn-brass" id="manualAddBtn">Ajouter à la bibliothèque</button>`;
-  document.getElementById('retryLookupBtn').addEventListener('click', async ()=>{
-    document.getElementById('addScanResult').innerHTML = '<p class="hint">Recherche des informations…</p>';
-    const info = await fetchBookByIsbn(isbn);
-    if (info && info.apiError) { renderApiErrorMessage(isbn, info.detail); return; }
-    if (!info) { renderManualAddForm(isbn); return; }
-    renderAddPreview(info);
-  });
-  document.getElementById('manualAddBtn').addEventListener('click', async ()=>{
-    const title = document.getElementById('manualTitle').value.trim();
-    if (!title) return showToast('Entre au moins un titre');
-    const author = document.getElementById('manualAuthor').value.trim() || 'Auteur inconnu';
-    await addBookToLibrary({ isbn, title, author, cover: '' });
-    document.getElementById('addScanResult').innerHTML = '';
-  });
+document.getElementById('stopAddScan').addEventListener('click', ()=>{
+  batchScanActive = false;
+  closeBarcodeScanner(document.getElementById('reader'));
+  document.getElementById('startAddScan').style.display = 'block';
+  document.getElementById('stopAddScan').style.display = 'none';
+});
+
+async function runBatchScanLoop(){
+  const readerEl = document.getElementById('reader');
+  while (batchScanActive){
+    const decodedIsbn = await new Promise(resolve=>{
+      openBarcodeScanner(readerEl, (value)=> resolve(value));
+    });
+    if (!batchScanActive) break;
+    await handleBatchScanResult(decodedIsbn);
+    if (!batchScanActive) break;
+    await new Promise(r => setTimeout(r, 400)); // petite pause avant de relancer la caméra pour le livre suivant
+  }
 }
-function renderManualAddForm(isbn){
-  document.getElementById('addScanResult').innerHTML = `
-    <p class="hint">Aucune information trouvée automatiquement pour l'ISBN ${isbn}. Ajoute-le manuellement :</p>
-    <div class="field">
-      <label>Titre</label>
-      <input type="text" id="manualTitle" placeholder="Titre du livre">
-    </div>
-    <div class="field">
-      <label>Auteur</label>
-      <input type="text" id="manualAuthor" placeholder="Auteur (optionnel)">
-    </div>
-    <button class="btn btn-brass" id="manualAddBtn">Ajouter à la bibliothèque</button>`;
-  document.getElementById('manualAddBtn').addEventListener('click', async ()=>{
-    const title = document.getElementById('manualTitle').value.trim();
-    if (!title) return showToast('Entre au moins un titre');
-    const author = document.getElementById('manualAuthor').value.trim() || 'Auteur inconnu';
-    await addBookToLibrary({ isbn, title, author, cover: '' });
-    document.getElementById('addScanResult').innerHTML = '';
-  });
+
+async function handleBatchScanResult(isbn){
+  if (scanBatch.some(item => item.isbn === isbn)){
+    showToast('Ce livre est déjà dans la liste de cette session');
+    return;
+  }
+  if (allBooks.some(b => b.isbn === isbn)){
+    showToast('Ce livre est déjà dans ta bibliothèque — ignoré');
+    return;
+  }
+  const tempId = 'scan_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
+  scanBatch.push({ tempId, isbn, title: 'Recherche…', author: '', cover: '', checked: true, loading: true });
+  renderScanPendingList();
+
+  const info = await fetchBookByIsbn(isbn);
+  const idx = scanBatch.findIndex(i => i.tempId === tempId);
+  if (idx === -1) return; // retiré de la liste entre-temps
+
+  if (info && !info.apiError){
+    scanBatch[idx] = { ...scanBatch[idx], title: info.title, author: info.author, cover: info.cover || '', loading: false };
+  } else {
+    scanBatch[idx] = { ...scanBatch[idx], title: `Non identifié (ISBN ${isbn})`, author: 'Auteur inconnu', cover: '', loading: false };
+  }
+  renderScanPendingList();
 }
-function renderAddPreview(info){
-  document.getElementById('addScanResult').innerHTML = `
-    <div class="result-card">
-      <div class="cover-sm" style="${info.cover ? `background-image:url('${info.cover}')` : ''}"></div>
+
+function renderScanPendingList(){
+  const el = document.getElementById('scanPendingList');
+  const confirmBtn = document.getElementById('confirmBatchAddBtn');
+  if (!scanBatch.length){
+    el.innerHTML = '';
+    confirmBtn.style.display = 'none';
+    return;
+  }
+  const checkedCount = scanBatch.filter(i => i.checked).length;
+  confirmBtn.style.display = 'block';
+  confirmBtn.textContent = `Ajouter les livres sélectionnés (${checkedCount})`;
+  el.innerHTML = '';
+  scanBatch.forEach(item=>{
+    const row = document.createElement('div');
+    row.className = 'manage-row';
+    row.innerHTML = `
+      <input type="checkbox" ${item.checked ? 'checked' : ''} style="width:19px; height:19px; flex-shrink:0;">
+      <div class="cover-sm" style="${item.cover ? `background-image:url('${item.cover}')` : ''}"></div>
       <div class="info">
-        <div class="t">${info.title}</div>
-        <div class="a">${info.author}</div>
+        <div class="t">${item.title}</div>
+        <div class="a">${item.author}</div>
       </div>
-      <button id="confirmAddBtn">Ajouter</button>
-    </div>`;
-  document.getElementById('confirmAddBtn').addEventListener('click', async ()=>{
-    await addBookToLibrary(info);
-    document.getElementById('addScanResult').innerHTML = '';
+      <button class="del-btn">✕</button>`;
+    row.querySelector('input[type="checkbox"]').addEventListener('change', (e)=>{
+      item.checked = e.target.checked;
+      renderScanPendingList();
+    });
+    row.querySelector('.del-btn').addEventListener('click', ()=>{
+      scanBatch = scanBatch.filter(i => i.tempId !== item.tempId);
+      renderScanPendingList();
+    });
+    el.appendChild(row);
   });
 }
+
+document.getElementById('confirmBatchAddBtn').addEventListener('click', async ()=>{
+  const toAdd = scanBatch.filter(item => item.checked && !item.loading);
+  if (!toAdd.length) return showToast('Aucun livre sélectionné');
+
+  // dernière vérification anti-doublon juste avant l'écriture
+  const knownIsbns = new Set(allBooks.map(b => b.isbn).filter(Boolean));
+  const finalList = toAdd.filter(item => !knownIsbns.has(item.isbn));
+  const skippedDup = toAdd.length - finalList.length;
+
+  if (!finalList.length){
+    showToast('Tous les livres sélectionnés sont déjà dans la bibliothèque');
+    scanBatch = [];
+    renderScanPendingList();
+    return;
+  }
+
+  const confirmBtn = document.getElementById('confirmBatchAddBtn');
+  confirmBtn.disabled = true;
+  try {
+    const batchSize = 400; // limite Firestore par batch
+    for (let i = 0; i < finalList.length; i += batchSize){
+      const writeBatch = db.batch();
+      finalList.slice(i, i + batchSize).forEach(item=>{
+        const ref = db.collection(BOOKS_COL).doc();
+        writeBatch.set(ref, {
+          isbn: item.isbn || '',
+          title: item.title,
+          author: item.author,
+          cover: item.cover || '',
+          addedAt: firebase.firestore.FieldValue.serverTimestamp()
+        });
+      });
+      await writeBatch.commit();
+    }
+    showToast(`${finalList.length} livre(s) ajouté(s)` + (skippedDup ? `, ${skippedDup} déjà présent(s) ignoré(s)` : ''));
+    scanBatch = [];
+    renderScanPendingList();
+    await loadBooks();
+    renderManageList();
+  } catch(e){
+    console.error(e);
+    showToast("Erreur lors de l'ajout du lot");
+  }
+  confirmBtn.disabled = false;
+});
+
 async function addBookToLibrary(info){
+  if (info.isbn && allBooks.some(b => b.isbn === info.isbn)){
+    showToast(`« ${info.title} » est déjà dans ta bibliothèque`);
+    return;
+  }
   try {
     await db.collection(BOOKS_COL).add({
       isbn: info.isbn || '',
@@ -1295,6 +1356,68 @@ document.getElementById('csvImportBtn').addEventListener('click', async ()=>{
   btn.textContent = 'Importer';
   summaryEl.textContent = `Terminé : ${added} ajoutés, ${skipped} déjà présents, ${ignoredNotOwned} ignorés, ${errors} erreurs.`;
   showToast(`Import terminé : ${added} livres ajoutés`);
+  await loadBooks();
+  renderManageList();
+});
+
+/* ---------- Compléter les livres incomplets ---------- */
+document.getElementById('enrichBtn').addEventListener('click', async ()=>{
+  const btn = document.getElementById('enrichBtn');
+  const logEl = document.getElementById('enrichLog');
+  const summaryEl = document.getElementById('enrichSummary');
+
+  const candidates = allBooks.filter(b => b.isbn && (!b.cover || !b.author || b.author === 'Auteur inconnu'));
+  if (!candidates.length){
+    return showToast("Rien à compléter : tous les livres ont déjà un auteur et une couverture (ou n'ont pas d'ISBN enregistré).");
+  }
+
+  logEl.innerHTML = '';
+  summaryEl.textContent = '';
+  btn.disabled = true;
+  btn.textContent = 'Recherche en cours…';
+
+  let updated = 0, unchanged = 0, errors = 0;
+  for (let i = 0; i < candidates.length; i++){
+    const b = candidates[i];
+    const line = document.createElement('div');
+    line.className = 'hint';
+    logEl.appendChild(line);
+    line.textContent = `${i + 1}/${candidates.length} — ${b.title} — recherche…`;
+    logEl.scrollTop = logEl.scrollHeight;
+
+    try {
+      const info = await fetchBookByIsbn(b.isbn);
+      if (!info || info.apiError){
+        line.textContent = `${b.title} — rien de mieux trouvé`;
+        unchanged++;
+      } else {
+        const updates = {};
+        if (info.title && info.title !== 'Titre inconnu' && (!b.title || b.title === 'Titre inconnu')) updates.title = info.title;
+        if (info.author && info.author !== 'Auteur inconnu' && (!b.author || b.author === 'Auteur inconnu')) updates.author = info.author;
+        if (info.cover && !b.cover) updates.cover = info.cover;
+
+        if (Object.keys(updates).length){
+          await db.collection(BOOKS_COL).doc(b.id).update(updates);
+          line.textContent = `✅ ${updates.title || b.title} — mis à jour`;
+          updated++;
+        } else {
+          line.textContent = `${b.title} — rien de mieux trouvé`;
+          unchanged++;
+        }
+      }
+    } catch(e){
+      console.error(e);
+      line.textContent = `❌ ${b.title} — erreur`;
+      errors++;
+    }
+    logEl.scrollTop = logEl.scrollHeight;
+    await new Promise(res => setTimeout(res, 250)); // ménage les API
+  }
+
+  btn.disabled = false;
+  btn.textContent = 'Rechercher les infos manquantes';
+  summaryEl.textContent = `Terminé : ${updated} mis à jour, ${unchanged} inchangés, ${errors} erreurs.`;
+  showToast(`${updated} livres complétés`);
   await loadBooks();
   renderManageList();
 });
