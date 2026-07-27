@@ -424,7 +424,7 @@ try {
   document.getElementById('configBanner').style.display = 'block';
 }
 
-const APP_VERSION = 20; // Incrémenté à chaque livraison pendant la phase de dev
+const APP_VERSION = 21; // Incrémenté à chaque livraison pendant la phase de dev
 document.getElementById('versionTag').textContent = 'V' + APP_VERSION;
 
 const BOOKS_COL = 'books';
@@ -612,6 +612,20 @@ async function searchBnfByTitleAuthor(title, author){
     return parseBnfDublinCoreRecords(text);
   } catch(e){ console.warn('BnF indisponible (CORS ou réseau) :', e); return []; }
 }
+/* Open Library a une API "couvertures" séparée de son API "données", directement
+   par ISBN. Elle a parfois une image même quand ni Google Books ni la fiche
+   complète d'Open Library n'en ont — utile comme dernier filet, peu importe
+   quelle source a fourni le titre/auteur. ?default=false fait renvoyer une
+   vraie erreur 404 s'il n'y a pas de couverture, plutôt que l'image "vide"
+   par défaut d'Open Library. */
+async function fetchOpenLibraryCoverUrl(isbn){
+  try {
+    const checkUrl = `https://covers.openlibrary.org/b/isbn/${isbn}-M.jpg?default=false`;
+    const res = await fetch(checkUrl);
+    if (res.ok) return `https://covers.openlibrary.org/b/isbn/${isbn}-M.jpg`;
+    return '';
+  } catch(e){ return ''; }
+}
 /* Retourne soit un livre { isbn, title, author, cover }, soit null (rien trouvé),
    soit { apiError: true, status, detail } si Google Books a répondu une erreur
    (429, 403, etc.) — utile pour afficher le vrai problème plutôt que
@@ -620,23 +634,32 @@ async function fetchBookByIsbn(isbn){
   // Ordre : Google Books (bonne couverture générale) → Open Library (bon sur
   // le français) → BnF (encore meilleur sur le français/jeunesse, en dernier
   // recours car XML et pas de couverture image)
+  let result = null;
   let info = await fetchFromGoogleBooksByIsbn(isbn);
   if (info && info.apiError){
     const olInfo = await fetchFromOpenLibraryByIsbn(isbn);
-    if (olInfo) return { isbn, title: olInfo.title || 'Titre inconnu', author: olInfo.author || 'Auteur inconnu', cover: olInfo.cover || '' };
-    const bnfInfo = await fetchFromBnfByIsbn(isbn);
-    if (bnfInfo) return { isbn, title: bnfInfo.title || 'Titre inconnu', author: bnfInfo.author || 'Auteur inconnu', cover: '' };
-    return info; // on remonte l'erreur telle quelle (status + detail)
+    if (olInfo) result = { isbn, title: olInfo.title || 'Titre inconnu', author: olInfo.author || 'Auteur inconnu', cover: olInfo.cover || '' };
+    else {
+      const bnfInfo = await fetchFromBnfByIsbn(isbn);
+      if (bnfInfo) result = { isbn, title: bnfInfo.title || 'Titre inconnu', author: bnfInfo.author || 'Auteur inconnu', cover: '' };
+      else return info; // on remonte l'erreur telle quelle (status + detail)
+    }
+  } else {
+    if (!info) info = await fetchFromOpenLibraryByIsbn(isbn);
+    if (!info) info = await fetchFromBnfByIsbn(isbn);
+    if (!info) return null;
+    result = {
+      isbn,
+      title: info.title || 'Titre inconnu',
+      author: info.author || 'Auteur inconnu',
+      cover: info.cover || ''
+    };
   }
-  if (!info) info = await fetchFromOpenLibraryByIsbn(isbn);
-  if (!info) info = await fetchFromBnfByIsbn(isbn);
-  if (!info) return null;
-  return {
-    isbn,
-    title: info.title || 'Titre inconnu',
-    author: info.author || 'Auteur inconnu',
-    cover: info.cover || ''
-  };
+  // Dernier coup de pouce pour la couverture, quelle que soit la source d'origine
+  if (result && !result.cover){
+    result.cover = await fetchOpenLibraryCoverUrl(isbn);
+  }
+  return result;
 }
 async function searchBooksByTitleAuthor(title, author, isRetry){
   const parts = [];
