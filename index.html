@@ -395,7 +395,7 @@ try {
   document.getElementById('configBanner').style.display = 'block';
 }
 
-const APP_VERSION = 6; // Incrémenté à chaque livraison pendant la phase de dev
+const APP_VERSION = 7; // Incrémenté à chaque livraison pendant la phase de dev
 document.getElementById('versionTag').textContent = 'V' + APP_VERSION;
 
 const BOOKS_COL = 'books';
@@ -505,13 +505,96 @@ async function searchBooksByTitle(title){
   });
 }
 
-/* ---------- Scanner (html5-qrcode) ---------- */
-/* Config restreinte aux formats de codes-barres utilisés sur les livres
-   (EAN-13/8 = ISBN, UPC = éditions US/Canada). Cela accélère et fiabilise
-   la détection par rapport à une recherche "tous formats".
-   qrbox en fonction (plutôt que taille fixe en pixels) : s'adapte à la
-   résolution réelle du flux vidéo, ce qui évite un décalage entre la zone
-   affichée à l'écran et la zone réellement analysée par le décodeur. */
+/* ---------- Scanner de codes-barres ---------- */
+/* Deux moteurs de détection, du plus fiable au moins fiable :
+   1) BarcodeDetector natif du navigateur (Chrome/Edge Android notamment) :
+      détection très fiable pour les codes-barres 1D (EAN-13) via un
+      algorithme intégré au navigateur, bien plus performant que le moteur
+      JS pur ci-dessous pour ce type de code.
+   2) html5-qrcode (moteur JS) : utilisé en repli si le navigateur ne
+      propose pas de BarcodeDetector natif (ex. Safari/iOS, Firefox). */
+const BARCODE_FORMATS_NATIVE = ['ean_13','ean_8','upc_a','upc_e','code_128'];
+
+async function nativeBarcodeSupport(){
+  if (!('BarcodeDetector' in window)) return false;
+  try {
+    const supported = await BarcodeDetector.getSupportedFormats();
+    return BARCODE_FORMATS_NATIVE.some(f => supported.includes(f));
+  } catch(e){ return false; }
+}
+
+/* Demande un flux caméra en haute résolution quand c'est possible : par défaut
+   les navigateurs mobiles fournissent souvent une résolution modeste (ex.
+   640x480), insuffisante pour lire les fines barres d'un code EAN-13. On
+   utilise "ideal" (préférence) et non "min" (obligation) : si le téléphone
+   ne peut pas fournir du Full HD, le navigateur donne simplement sa meilleure
+   résolution disponible au lieu de refuser d'ouvrir la caméra. */
+const CAMERA_CONSTRAINTS = {
+  facingMode: { ideal: 'environment' },
+  width: { ideal: 1920 },
+  height: { ideal: 1080 }
+};
+
+/* Moteur natif : ouvre la caméra manuellement (sans html5-qrcode) et appelle
+   detect() sur chaque frame vidéo via requestAnimationFrame. */
+function createNativeScanner(containerEl, onDecode, onFatalError){
+  let stream = null, video = null, rafId = null, stopped = false, detector = null;
+
+  async function start(){
+    try {
+      detector = new BarcodeDetector({ formats: BARCODE_FORMATS_NATIVE });
+    } catch(e){ onFatalError(e); return; }
+
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: CAMERA_CONSTRAINTS });
+    } catch(e){
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+      } catch(e2){ onFatalError(e2); return; }
+    }
+
+    video = document.createElement('video');
+    video.setAttribute('playsinline', 'true');
+    video.setAttribute('autoplay', 'true');
+    video.muted = true;
+    video.style.width = '100%';
+    video.style.display = 'block';
+    video.style.borderRadius = '8px';
+    containerEl.appendChild(video);
+    video.srcObject = stream;
+    try { await video.play(); } catch(e){ /* certains navigateurs auto-play déjà */ }
+
+    const tick = async ()=>{
+      if (stopped) return;
+      if (video.readyState >= 2){
+        try {
+          const results = await detector.detect(video);
+          if (results && results.length){
+            const value = results[0].rawValue;
+            stop();
+            onDecode(value);
+            return;
+          }
+        } catch(e){ /* erreur de détection ponctuelle, on continue */ }
+      }
+      rafId = requestAnimationFrame(tick);
+    };
+    tick();
+  }
+
+  function stop(){
+    if (stopped) return;
+    stopped = true;
+    if (rafId) cancelAnimationFrame(rafId);
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    containerEl.innerHTML = '';
+    containerEl.style.display = 'none';
+  }
+
+  return { start, stop };
+}
+
+/* Moteur de repli (html5-qrcode, JS pur) */
 function getScannerConfig(){
   return {
     fps: 15,
@@ -530,49 +613,76 @@ function getScannerConfig(){
     ]
   };
 }
-/* Demande un flux caméra en haute résolution quand c'est possible : par défaut
-   les navigateurs mobiles fournissent souvent une résolution modeste (ex.
-   640x480), insuffisante pour lire les fines barres d'un code EAN-13. On
-   utilise "ideal" (préférence) et non "min" (obligation) : si le téléphone
-   ne peut pas fournir du Full HD, le navigateur donne simplement sa meilleure
-   résolution disponible au lieu de refuser d'ouvrir la caméra. */
-const CAMERA_CONSTRAINTS = {
-  facingMode: { ideal: 'environment' },
-  width: { ideal: 1920 },
-  height: { ideal: 1080 }
-};
-let scannerInstance = null;
-async function startScanner(onDecode){
-  const readerEl = document.getElementById('reader');
-  readerEl.style.display = 'block';
-  readerEl.innerHTML = '';
+async function startJsScanner(containerEl, onDecode, onGiveUp){
   const config = getScannerConfig();
-  const onSuccess = (decodedText)=>{ stopScanner(); onDecode(decodedText); };
-
-  scannerInstance = new Html5Qrcode('reader');
+  const onSuccess = (decodedText)=>{ onDecode(decodedText); };
+  let instance = new Html5Qrcode(containerEl.id);
   try {
-    await scannerInstance.start(CAMERA_CONSTRAINTS, config, onSuccess);
-  } catch (err){
+    await instance.start(CAMERA_CONSTRAINTS, config, onSuccess);
+  } catch(err){
     console.error('Échec ouverture caméra (contraintes HD), repli sur config simple:', err);
     try {
-      readerEl.innerHTML = '';
-      scannerInstance = new Html5Qrcode('reader'); // instance fraîche, l'ancienne peut être dans un état invalide
-      await scannerInstance.start({ facingMode: 'environment' }, config, onSuccess);
-    } catch (err2){
-      console.error('Échec ouverture caméra (repli):', err2);
-      showToast("Impossible d'accéder à la caméra");
-      readerEl.style.display = 'none';
+      containerEl.innerHTML = '';
+      instance = new Html5Qrcode(containerEl.id);
+      await instance.start({ facingMode: 'environment' }, config, onSuccess);
+    } catch(err2){
+      console.error('Échec ouverture caméra:', err2);
+      onGiveUp();
+      return null;
     }
   }
+  return instance;
+}
+
+/* Point d'entrée commun aux deux scanners de l'app (onglet "Ajouter (scan)"
+   et bouton de recherche). Choisit le meilleur moteur disponible. */
+async function openBarcodeScanner(containerEl, onDecode){
+  containerEl.style.display = 'block';
+  containerEl.innerHTML = '';
+
+  const useNative = await nativeBarcodeSupport();
+  if (useNative){
+    const scanner = createNativeScanner(containerEl,
+      (value)=>{ onDecode(value); },
+      (err)=>{
+        console.error('Scanner natif indisponible, repli JS:', err);
+        containerEl.innerHTML = '';
+        startJsScanner(containerEl,
+          (value)=>{ onDecode(value); currentScannerControl = null; },
+          ()=>{ showToast("Impossible d'accéder à la caméra"); containerEl.style.display = 'none'; }
+        ).then(instance=>{ currentScannerControl = instance ? { stop: ()=>instance.stop().then(()=>instance.clear()).catch(()=>{}) } : null; });
+      }
+    );
+    currentScannerControl = scanner;
+    scanner.start();
+  } else {
+    const instance = await startJsScanner(containerEl,
+      (value)=>{ onDecode(value); currentScannerControl = null; },
+      ()=>{ showToast("Impossible d'accéder à la caméra"); containerEl.style.display = 'none'; }
+    );
+    currentScannerControl = instance ? { stop: ()=>instance.stop().then(()=>instance.clear()).catch(()=>{}) } : null;
+  }
+}
+function closeBarcodeScanner(containerEl){
+  if (currentScannerControl){
+    currentScannerControl.stop();
+    currentScannerControl = null;
+  }
+  containerEl.style.display = 'none';
+  containerEl.innerHTML = '';
+}
+
+let currentScannerControl = null;
+
+function startScanner(onDecode){
+  const readerEl = document.getElementById('reader');
+  openBarcodeScanner(readerEl, (value)=>{
+    closeBarcodeScanner(readerEl);
+    onDecode(value);
+  });
 }
 function stopScanner(){
-  if (scannerInstance) {
-    scannerInstance.stop().then(()=>{
-      scannerInstance.clear();
-      document.getElementById('reader').style.display = 'none';
-      scannerInstance = null;
-    }).catch(()=>{});
-  }
+  closeBarcodeScanner(document.getElementById('reader'));
 }
 
 /* ---------- Scan pour la recherche (bouton en haut de la barre de recherche) ---------- */
@@ -591,33 +701,17 @@ searchScanOverlay.innerHTML = `
   </div>`;
 document.body.appendChild(searchScanOverlay);
 
-let searchScannerInstance = null;
-document.getElementById('scanSearchBtn').addEventListener('click', async ()=>{
+document.getElementById('scanSearchBtn').addEventListener('click', ()=>{
   document.getElementById('searchScanOverlay').classList.add('open');
-  const config = getScannerConfig();
-  const onSuccess = (decodedText)=>{ closeSearchScan(); handleSearchScanResult(decodedText); };
-
-  searchScannerInstance = new Html5Qrcode('searchReader');
-  try {
-    await searchScannerInstance.start(CAMERA_CONSTRAINTS, config, onSuccess);
-  } catch (err){
-    console.error('Échec ouverture caméra (contraintes HD), repli sur config simple:', err);
-    try {
-      document.getElementById('searchReader').innerHTML = '';
-      searchScannerInstance = new Html5Qrcode('searchReader');
-      await searchScannerInstance.start({ facingMode: 'environment' }, config, onSuccess);
-    } catch (err2){
-      console.error('Échec ouverture caméra (repli):', err2);
-      showToast("Impossible d'accéder à la caméra");
-    }
-  }
+  const readerEl = document.getElementById('searchReader');
+  openBarcodeScanner(readerEl, (value)=>{
+    closeSearchScan();
+    handleSearchScanResult(value);
+  });
 });
 function closeSearchScan(){
   document.getElementById('searchScanOverlay').classList.remove('open');
-  if (searchScannerInstance){
-    searchScannerInstance.stop().then(()=>searchScannerInstance.clear()).catch(()=>{});
-    searchScannerInstance = null;
-  }
+  closeBarcodeScanner(document.getElementById('searchReader'));
 }
 function handleSearchScanResult(isbn){
   const found = allBooks.find(b => b.isbn === isbn);
