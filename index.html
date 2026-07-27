@@ -379,7 +379,7 @@
       </div>
 
       <div class="tab-panel" id="tab-incomplete">
-        <p class="hint">Livres avec un titre, un auteur ou une couverture manquants. Copie l'ISBN pour le chercher toi-même ailleurs, ou complète directement ici (URL d'image, ou import depuis ton appareil).</p>
+        <p class="hint">Livres dont le titre ou l'auteur n'a pas pu être identifié automatiquement. Copie l'ISBN pour le chercher toi-même ailleurs, ou complète directement ici (tu peux aussi ajouter une couverture si tu veux, mais ce n'est pas ce qui te fait apparaître dans cette liste).</p>
         <div id="incompleteList"></div>
       </div>
 
@@ -437,7 +437,7 @@ try {
   document.getElementById('configBanner').style.display = 'block';
 }
 
-const APP_VERSION = 22; // Incrémenté à chaque livraison pendant la phase de dev
+const APP_VERSION = 23; // Incrémenté à chaque livraison pendant la phase de dev
 document.getElementById('versionTag').textContent = 'V' + APP_VERSION;
 
 const BOOKS_COL = 'books';
@@ -1542,10 +1542,10 @@ function renderIncompleteList(){
   const el = document.getElementById('incompleteList');
   if (!el) return; // pas encore dans le DOM au tout premier chargement
   const incomplete = allBooks.filter(b =>
-    !b.cover || !b.author || b.author === 'Auteur inconnu' || !b.title || b.title === 'Titre inconnu'
+    !b.author || b.author === 'Auteur inconnu' || !b.title || b.title === 'Titre inconnu'
   );
   if (!incomplete.length){
-    el.innerHTML = '<p class="hint">Tous tes livres ont un titre, un auteur et une couverture. 🎉</p>';
+    el.innerHTML = '<p class="hint">Tous tes livres ont un titre et un auteur identifiés. 🎉</p>';
     return;
   }
   el.innerHTML = '';
