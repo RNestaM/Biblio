@@ -395,7 +395,7 @@ try {
   document.getElementById('configBanner').style.display = 'block';
 }
 
-const APP_VERSION = 5; // Incrémenté à chaque livraison pendant la phase de dev
+const APP_VERSION = 6; // Incrémenté à chaque livraison pendant la phase de dev
 document.getElementById('versionTag').textContent = 'V' + APP_VERSION;
 
 const BOOKS_COL = 'books';
@@ -530,37 +530,40 @@ function getScannerConfig(){
     ]
   };
 }
-/* Demande un flux caméra en haute résolution : par défaut les navigateurs
-   mobiles fournissent souvent une résolution modeste (ex. 640x480), ce qui
-   est insuffisant pour lire les fines barres d'un code EAN-13 à distance
-   normale. On demande explicitement du Full HD si le téléphone le permet. */
+/* Demande un flux caméra en haute résolution quand c'est possible : par défaut
+   les navigateurs mobiles fournissent souvent une résolution modeste (ex.
+   640x480), insuffisante pour lire les fines barres d'un code EAN-13. On
+   utilise "ideal" (préférence) et non "min" (obligation) : si le téléphone
+   ne peut pas fournir du Full HD, le navigateur donne simplement sa meilleure
+   résolution disponible au lieu de refuser d'ouvrir la caméra. */
 const CAMERA_CONSTRAINTS = {
   facingMode: { ideal: 'environment' },
-  width: { min: 1280, ideal: 1920 },
-  height: { min: 720, ideal: 1080 }
+  width: { ideal: 1920 },
+  height: { ideal: 1080 }
 };
 let scannerInstance = null;
-function startScanner(onDecode){
+async function startScanner(onDecode){
   const readerEl = document.getElementById('reader');
   readerEl.style.display = 'block';
   readerEl.innerHTML = '';
-  scannerInstance = new Html5Qrcode('reader');
   const config = getScannerConfig();
-  scannerInstance.start(CAMERA_CONSTRAINTS, config, (decodedText)=>{
-    stopScanner();
-    onDecode(decodedText);
-  }).catch(err=>{
-    console.error(err);
-    // Repli : certains téléphones refusent des contraintes de résolution trop strictes
-    scannerInstance.start({ facingMode: 'environment' }, config, (decodedText)=>{
-      stopScanner();
-      onDecode(decodedText);
-    }).catch(err2=>{
-      console.error(err2);
+  const onSuccess = (decodedText)=>{ stopScanner(); onDecode(decodedText); };
+
+  scannerInstance = new Html5Qrcode('reader');
+  try {
+    await scannerInstance.start(CAMERA_CONSTRAINTS, config, onSuccess);
+  } catch (err){
+    console.error('Échec ouverture caméra (contraintes HD), repli sur config simple:', err);
+    try {
+      readerEl.innerHTML = '';
+      scannerInstance = new Html5Qrcode('reader'); // instance fraîche, l'ancienne peut être dans un état invalide
+      await scannerInstance.start({ facingMode: 'environment' }, config, onSuccess);
+    } catch (err2){
+      console.error('Échec ouverture caméra (repli):', err2);
       showToast("Impossible d'accéder à la caméra");
       readerEl.style.display = 'none';
-    });
-  });
+    }
+  }
 }
 function stopScanner(){
   if (scannerInstance) {
@@ -589,23 +592,25 @@ searchScanOverlay.innerHTML = `
 document.body.appendChild(searchScanOverlay);
 
 let searchScannerInstance = null;
-document.getElementById('scanSearchBtn').addEventListener('click', ()=>{
+document.getElementById('scanSearchBtn').addEventListener('click', async ()=>{
   document.getElementById('searchScanOverlay').classList.add('open');
   const config = getScannerConfig();
+  const onSuccess = (decodedText)=>{ closeSearchScan(); handleSearchScanResult(decodedText); };
+
   searchScannerInstance = new Html5Qrcode('searchReader');
-  searchScannerInstance.start(CAMERA_CONSTRAINTS, config, (decodedText)=>{
-    closeSearchScan();
-    handleSearchScanResult(decodedText);
-  }).catch(err=>{
-    console.error(err);
-    searchScannerInstance.start({ facingMode: 'environment' }, config, (decodedText)=>{
-      closeSearchScan();
-      handleSearchScanResult(decodedText);
-    }).catch(err2=>{
-      console.error(err2);
+  try {
+    await searchScannerInstance.start(CAMERA_CONSTRAINTS, config, onSuccess);
+  } catch (err){
+    console.error('Échec ouverture caméra (contraintes HD), repli sur config simple:', err);
+    try {
+      document.getElementById('searchReader').innerHTML = '';
+      searchScannerInstance = new Html5Qrcode('searchReader');
+      await searchScannerInstance.start({ facingMode: 'environment' }, config, onSuccess);
+    } catch (err2){
+      console.error('Échec ouverture caméra (repli):', err2);
       showToast("Impossible d'accéder à la caméra");
-    });
-  });
+    }
+  }
 });
 function closeSearchScan(){
   document.getElementById('searchScanOverlay').classList.remove('open');
