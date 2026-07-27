@@ -312,7 +312,7 @@
       <h2>Gérer la bibliothèque</h2>
       <div class="tabs">
         <button class="tab active" data-tab="addScan">Ajouter (scan)</button>
-        <button class="tab" data-tab="addTitle">Ajouter (titre)</button>
+        <button class="tab" data-tab="addTitle">Ajouter manuellement</button>
         <button class="tab" data-tab="importCsv">Importer CSV</button>
         <button class="tab" data-tab="list">Livres</button>
         <button class="tab" data-tab="security">Sécurité</button>
@@ -326,9 +326,18 @@
       </div>
 
       <div class="tab-panel" id="tab-addTitle">
+        <p class="hint">Renseigne le titre et/ou l'auteur, ou directement l'ISBN (recherche la plus fiable). Au moins un champ est requis.</p>
         <div class="field">
-          <label>Titre du livre</label>
+          <label>Titre</label>
           <input type="text" id="titleSearchInput" placeholder="Ex : Les Misérables">
+        </div>
+        <div class="field">
+          <label>Auteur</label>
+          <input type="text" id="authorSearchInput" placeholder="Ex : Victor Hugo (optionnel)">
+        </div>
+        <div class="field">
+          <label>ISBN</label>
+          <input type="text" id="isbnSearchInput" placeholder="Ex : 9782070408504 (optionnel)" inputmode="numeric">
         </div>
         <button class="btn btn-brass" id="titleSearchBtn">Rechercher</button>
         <div id="titleSearchResults" style="margin-top:14px;"></div>
@@ -405,7 +414,7 @@ try {
   document.getElementById('configBanner').style.display = 'block';
 }
 
-const APP_VERSION = 13; // Incrémenté à chaque livraison pendant la phase de dev
+const APP_VERSION = 15; // Incrémenté à chaque livraison pendant la phase de dev
 document.getElementById('versionTag').textContent = 'V' + APP_VERSION;
 
 const BOOKS_COL = 'books';
@@ -500,9 +509,15 @@ async function fetchFromGoogleBooksByIsbn(isbn, isRetry){
         await new Promise(r => setTimeout(r, 1500));
         return fetchFromGoogleBooksByIsbn(isbn, true);
       }
-      return { rateLimited: true };
+      return { apiError: true, status: 429, detail: 'Trop de requêtes (429)' };
     }
-    if (!res.ok) { console.warn('Google Books a répondu avec le statut', res.status); return null; }
+    if (!res.ok) {
+      const bodyText = await res.text().catch(()=> '');
+      let detail = `Statut ${res.status}`;
+      try { const parsed = JSON.parse(bodyText); if (parsed.error && parsed.error.message) detail = `${res.status} — ${parsed.error.message}`; } catch(parseErr){}
+      console.warn('Google Books:', detail);
+      return { apiError: true, status: res.status, detail };
+    }
     const data = await res.json();
     if (!data.items || !data.items.length) return null;
     const info = data.items[0].volumeInfo;
@@ -513,7 +528,7 @@ async function fetchFromGoogleBooksByIsbn(isbn, isRetry){
       author: (info.authors || []).join(', ') || '',
       cover: info.imageLinks ? (info.imageLinks.thumbnail || info.imageLinks.smallThumbnail) : ''
     };
-  } catch(e){ console.error(e); return null; }
+  } catch(e){ console.error(e); return { apiError: true, status: 0, detail: 'Erreur réseau : ' + e.message }; }
 }
 async function fetchFromOpenLibraryByIsbn(isbn){
   try {
@@ -531,16 +546,17 @@ async function fetchFromOpenLibraryByIsbn(isbn){
   } catch(e){ console.error(e); return null; }
 }
 /* Retourne soit un livre { isbn, title, author, cover }, soit null (rien trouvé),
-   soit { rateLimited: true } si Google Books a temporairement bloqué les requêtes
-   (utile pour afficher un message différent de "livre introuvable"). */
+   soit { apiError: true, status, detail } si Google Books a répondu une erreur
+   (429, 403, etc.) — utile pour afficher le vrai problème plutôt que
+   "livre introuvable". */
 async function fetchBookByIsbn(isbn){
   // Google Books en premier (bonne couverture générale), Open Library en repli
   // (couverture souvent meilleure sur les éditions françaises/petits éditeurs)
   let info = await fetchFromGoogleBooksByIsbn(isbn);
-  if (info && info.rateLimited){
+  if (info && info.apiError){
     const olInfo = await fetchFromOpenLibraryByIsbn(isbn);
     if (olInfo) return { isbn, title: olInfo.title || 'Titre inconnu', author: olInfo.author || 'Auteur inconnu', cover: olInfo.cover || '' };
-    return { rateLimited: true };
+    return info; // on remonte l'erreur telle quelle (status + detail)
   }
   if (!info) info = await fetchFromOpenLibraryByIsbn(isbn);
   if (!info) return null;
@@ -551,8 +567,19 @@ async function fetchBookByIsbn(isbn){
     cover: info.cover || ''
   };
 }
-async function searchBooksByTitle(title){
-  const res = await fetch(`https://www.googleapis.com/books/v1/volumes?q=intitle:${encodeURIComponent(title)}&maxResults=10&key=${GOOGLE_BOOKS_API_KEY}`);
+async function searchBooksByTitleAuthor(title, author){
+  const parts = [];
+  if (title) parts.push(`intitle:${title}`);
+  if (author) parts.push(`inauthor:${author}`);
+  const q = parts.join(' ');
+  const res = await fetch(`https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(q)}&maxResults=10&key=${GOOGLE_BOOKS_API_KEY}`);
+  if (!res.ok){
+    const bodyText = await res.text().catch(()=> '');
+    const err = new Error(`Google Books a répondu avec le statut ${res.status}`);
+    err.status = res.status;
+    err.body = bodyText;
+    throw err;
+  }
   const data = await res.json();
   if (!data.items) return [];
   return data.items.map(it => {
@@ -872,8 +899,8 @@ document.getElementById('startAddScan').addEventListener('click', ()=>{
   startScanner(async (isbn)=>{
     document.getElementById('addScanResult').innerHTML = '<p class="hint">Recherche des informations…</p>';
     const info = await fetchBookByIsbn(isbn);
-    if (info && info.rateLimited) {
-      renderRateLimitedMessage(isbn);
+    if (info && info.apiError) {
+      renderApiErrorMessage(isbn, info.detail);
       return;
     }
     if (!info) {
@@ -883,9 +910,9 @@ document.getElementById('startAddScan').addEventListener('click', ()=>{
     renderAddPreview(info);
   });
 });
-function renderRateLimitedMessage(isbn){
+function renderApiErrorMessage(isbn, detail){
   document.getElementById('addScanResult').innerHTML = `
-    <p class="hint">Le service de recherche (Google Books) est temporairement limité — ce n'est pas que le livre n'existe pas. Réessaie dans quelques instants, ou ajoute-le manuellement en attendant :</p>
+    <p class="hint">La recherche automatique a échoué — ce n'est pas que le livre n'existe pas :<br><strong>${detail || 'Erreur inconnue'}</strong></p>
     <button class="btn btn-outline" id="retryLookupBtn" style="margin-bottom:12px;">Réessayer la recherche</button>
     <div class="field">
       <label>Titre</label>
@@ -899,7 +926,7 @@ function renderRateLimitedMessage(isbn){
   document.getElementById('retryLookupBtn').addEventListener('click', async ()=>{
     document.getElementById('addScanResult').innerHTML = '<p class="hint">Recherche des informations…</p>';
     const info = await fetchBookByIsbn(isbn);
-    if (info && info.rateLimited) { renderRateLimitedMessage(isbn); return; }
+    if (info && info.apiError) { renderApiErrorMessage(isbn, info.detail); return; }
     if (!info) { renderManualAddForm(isbn); return; }
     renderAddPreview(info);
   });
@@ -964,17 +991,91 @@ async function addBookToLibrary(info){
   }
 }
 
-/* ---------- Ajout par titre ---------- */
+/* ---------- Ajout manuel (titre / auteur / ISBN) ---------- */
+function escapeHtmlAttr(str){
+  return String(str || '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+function renderManualFallback(containerEl, isbn, title, author, message){
+  containerEl.innerHTML = `
+    <p class="hint">${message} Tu peux ajouter le livre manuellement :</p>
+    <div class="field">
+      <label>Titre</label>
+      <input type="text" id="fallbackTitle" value="${escapeHtmlAttr(title)}" placeholder="Titre du livre">
+    </div>
+    <div class="field">
+      <label>Auteur</label>
+      <input type="text" id="fallbackAuthor" value="${escapeHtmlAttr(author)}" placeholder="Auteur (optionnel)">
+    </div>
+    <button class="btn btn-brass" id="fallbackAddBtn">Ajouter à la bibliothèque</button>`;
+  containerEl.querySelector('#fallbackAddBtn').addEventListener('click', async ()=>{
+    const t = document.getElementById('fallbackTitle').value.trim();
+    if (!t) return showToast('Entre au moins un titre');
+    const a = document.getElementById('fallbackAuthor').value.trim() || 'Auteur inconnu';
+    await addBookToLibrary({ isbn: isbn || '', title: t, author: a, cover: '' });
+    containerEl.innerHTML = '';
+  });
+}
+function renderSingleResultPreview(containerEl, info){
+  containerEl.innerHTML = `
+    <div class="result-card">
+      <div class="cover-sm" style="${info.cover ? `background-image:url('${info.cover}')` : ''}"></div>
+      <div class="info">
+        <div class="t">${info.title}</div>
+        <div class="a">${info.author}</div>
+      </div>
+      <button id="confirmSingleAddBtn">Ajouter</button>
+    </div>`;
+  containerEl.querySelector('#confirmSingleAddBtn').addEventListener('click', async ()=>{
+    await addBookToLibrary(info);
+    containerEl.innerHTML = '';
+  });
+}
 document.getElementById('titleSearchBtn').addEventListener('click', async ()=>{
-  const q = document.getElementById('titleSearchInput').value.trim();
-  if (!q) return;
-  document.getElementById('titleSearchResults').innerHTML = '<p class="hint">Recherche…</p>';
-  const results = await searchBooksByTitle(q);
-  if (!results.length){
-    document.getElementById('titleSearchResults').innerHTML = '<p class="hint">Aucun résultat.</p>';
+  const title = document.getElementById('titleSearchInput').value.trim();
+  const author = document.getElementById('authorSearchInput').value.trim();
+  const isbn = document.getElementById('isbnSearchInput').value.trim().replace(/[^0-9Xx]/g, '');
+  const resultsEl = document.getElementById('titleSearchResults');
+
+  if (!title && !author && !isbn){
+    return showToast('Renseigne au moins un champ (titre, auteur ou ISBN)');
+  }
+
+  resultsEl.innerHTML = '<p class="hint">Recherche…</p>';
+
+  // Priorité à l'ISBN si renseigné : recherche exacte, bien plus fiable qu'une recherche texte
+  if (isbn){
+    const info = await fetchBookByIsbn(isbn);
+    if (info && info.apiError){
+      renderManualFallback(resultsEl, isbn, title, author, `La recherche automatique a échoué : ${info.detail || 'erreur inconnue'}.`);
+      return;
+    }
+    if (!info){
+      renderManualFallback(resultsEl, isbn, title, author, `Aucune information trouvée pour l'ISBN ${isbn}.`);
+      return;
+    }
+    renderSingleResultPreview(resultsEl, info);
     return;
   }
-  document.getElementById('titleSearchResults').innerHTML = '';
+
+  // Sinon recherche par titre et/ou auteur
+  let results;
+  try {
+    results = await searchBooksByTitleAuthor(title, author);
+  } catch(e){
+    console.error(e);
+    let detail = e.message || 'Erreur inconnue';
+    try {
+      const parsed = JSON.parse(e.body || '{}');
+      if (parsed.error && parsed.error.message) detail = `${e.status} — ${parsed.error.message}`;
+    } catch(parseErr){ /* corps non-JSON, on garde le message par défaut */ }
+    renderManualFallback(resultsEl, '', title, author, `Erreur lors de la recherche : ${detail}.`);
+    return;
+  }
+  if (!results.length){
+    renderManualFallback(resultsEl, '', title, author, `Aucun résultat.`);
+    return;
+  }
+  resultsEl.innerHTML = '';
   results.forEach(info=>{
     const card = document.createElement('div');
     card.className = 'result-card';
@@ -986,7 +1087,7 @@ document.getElementById('titleSearchBtn').addEventListener('click', async ()=>{
       </div>
       <button>Ajouter</button>`;
     card.querySelector('button').addEventListener('click', ()=> addBookToLibrary(info));
-    document.getElementById('titleSearchResults').appendChild(card);
+    resultsEl.appendChild(card);
   });
 });
 
@@ -1060,12 +1161,12 @@ document.getElementById('csvImportBtn').addEventListener('click', async ()=>{
 
     try {
       let info = await fetchBookByIsbn(isbn);
-      if (info && info.rateLimited){
-        line.textContent = `${csvTitle} — service limité, nouvelle tentative…`;
+      if (info && info.apiError){
+        line.textContent = `${csvTitle} — erreur API, nouvelle tentative…`;
         await new Promise(res => setTimeout(res, 4000));
         info = await fetchBookByIsbn(isbn);
       }
-      if (!info || info.rateLimited) info = { isbn, title: csvTitle || 'Titre inconnu', author: 'Auteur inconnu', cover: '' };
+      if (!info || info.apiError) info = { isbn, title: csvTitle || 'Titre inconnu', author: 'Auteur inconnu', cover: '' };
       else if (!info.title) info.title = csvTitle || info.title;
 
       await db.collection(BOOKS_COL).add({
