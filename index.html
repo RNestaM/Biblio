@@ -414,7 +414,7 @@ try {
   document.getElementById('configBanner').style.display = 'block';
 }
 
-const APP_VERSION = 16; // Incrémenté à chaque livraison pendant la phase de dev
+const APP_VERSION = 17; // Incrémenté à chaque livraison pendant la phase de dev
 document.getElementById('versionTag').textContent = 'V' + APP_VERSION;
 
 const BOOKS_COL = 'books';
@@ -597,6 +597,24 @@ async function searchBooksByTitleAuthor(title, author, isRetry){
       cover: info.imageLinks ? (info.imageLinks.thumbnail || info.imageLinks.smallThumbnail) : ''
     };
   });
+}
+async function searchOpenLibraryByTitleAuthor(title, author){
+  try {
+    const params = new URLSearchParams();
+    if (title) params.set('title', title);
+    if (author) params.set('author', author);
+    params.set('limit', '10');
+    const res = await fetch(`https://openlibrary.org/search.json?${params.toString()}`);
+    if (!res.ok) return [];
+    const data = await res.json();
+    if (!data.docs) return [];
+    return data.docs.map(d => ({
+      isbn: (d.isbn && d.isbn[0]) || '',
+      title: d.title || 'Titre inconnu',
+      author: (d.author_name || []).join(', ') || 'Auteur inconnu',
+      cover: d.cover_i ? `https://covers.openlibrary.org/b/id/${d.cover_i}-M.jpg` : ''
+    }));
+  } catch(e){ console.error(e); return []; }
 }
 
 /* ---------- Scanner de codes-barres ---------- */
@@ -1062,24 +1080,38 @@ document.getElementById('titleSearchBtn').addEventListener('click', async ()=>{
     return;
   }
 
-  // Sinon recherche par titre et/ou auteur
-  let results;
+  // Sinon recherche par titre et/ou auteur (Google Books, puis Open Library en repli)
+  let results = [];
+  let googleFailed = false;
+  let googleErrorDetail = '';
   try {
     results = await searchBooksByTitleAuthor(title, author);
   } catch(e){
     console.error(e);
-    let detail = e.message || 'Erreur inconnue';
+    googleFailed = true;
+    googleErrorDetail = e.message || 'Erreur inconnue';
     try {
       const parsed = JSON.parse(e.body || '{}');
-      if (parsed.error && parsed.error.message) detail = `${e.status} — ${parsed.error.message}`;
+      if (parsed.error && parsed.error.message) googleErrorDetail = `${e.status} — ${parsed.error.message}`;
     } catch(parseErr){ /* corps non-JSON, on garde le message par défaut */ }
-    renderManualFallback(resultsEl, '', title, author, `Erreur lors de la recherche : ${detail}.`);
-    return;
   }
+
   if (!results.length){
-    renderManualFallback(resultsEl, '', title, author, `Aucun résultat.`);
+    // Repli Open Library, que Google Books ait planté ou juste rien trouvé
+    const olResults = await searchOpenLibraryByTitleAuthor(title, author);
+    if (olResults.length){
+      renderResultsList(resultsEl, olResults);
+      return;
+    }
+    const message = googleFailed
+      ? `Erreur lors de la recherche (Google Books : ${googleErrorDetail}). Open Library n'a rien trouvé non plus.`
+      : `Aucun résultat.`;
+    renderManualFallback(resultsEl, '', title, author, message);
     return;
   }
+  renderResultsList(resultsEl, results);
+});
+function renderResultsList(resultsEl, results){
   resultsEl.innerHTML = '';
   results.forEach(info=>{
     const card = document.createElement('div');
@@ -1094,7 +1126,7 @@ document.getElementById('titleSearchBtn').addEventListener('click', async ()=>{
     card.querySelector('button').addEventListener('click', ()=> addBookToLibrary(info));
     resultsEl.appendChild(card);
   });
-});
+}
 
 /* ---------- Import CSV (ex: export Gleeph) ---------- */
 function parseCSV(text){
