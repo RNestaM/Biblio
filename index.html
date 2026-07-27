@@ -395,7 +395,7 @@ try {
   document.getElementById('configBanner').style.display = 'block';
 }
 
-const APP_VERSION = 8; // Incrémenté à chaque livraison pendant la phase de dev
+const APP_VERSION = 9; // Incrémenté à chaque livraison pendant la phase de dev
 document.getElementById('versionTag').textContent = 'V' + APP_VERSION;
 
 const BOOKS_COL = 'books';
@@ -476,17 +476,47 @@ function renderEmpty(msg){
 
 document.getElementById('searchInput').addEventListener('input', (e)=> render(e.target.value));
 
-/* ---------- Recherche de métadonnées (Google Books) ---------- */
+/* ---------- Recherche de métadonnées (Google Books, avec repli Open Library) ---------- */
+async function fetchFromGoogleBooksByIsbn(isbn){
+  try {
+    const res = await fetch(`https://www.googleapis.com/books/v1/volumes?q=isbn:${isbn}`);
+    const data = await res.json();
+    if (!data.items || !data.items.length) return null;
+    const info = data.items[0].volumeInfo;
+    if (!info.title) return null;
+    return {
+      isbn,
+      title: info.title,
+      author: (info.authors || []).join(', ') || '',
+      cover: info.imageLinks ? (info.imageLinks.thumbnail || info.imageLinks.smallThumbnail) : ''
+    };
+  } catch(e){ console.error(e); return null; }
+}
+async function fetchFromOpenLibraryByIsbn(isbn){
+  try {
+    const res = await fetch(`https://openlibrary.org/api/books?bibkeys=ISBN:${isbn}&format=json&jscmd=data`);
+    const data = await res.json();
+    const info = data['ISBN:' + isbn];
+    if (!info || !info.title) return null;
+    return {
+      isbn,
+      title: info.title,
+      author: (info.authors || []).map(a => a.name).join(', ') || '',
+      cover: info.cover ? (info.cover.medium || info.cover.large || info.cover.small || '') : ''
+    };
+  } catch(e){ console.error(e); return null; }
+}
 async function fetchBookByIsbn(isbn){
-  const res = await fetch(`https://www.googleapis.com/books/v1/volumes?q=isbn:${isbn}`);
-  const data = await res.json();
-  if (!data.items || !data.items.length) return null;
-  const info = data.items[0].volumeInfo;
+  // Google Books en premier (bonne couverture générale), Open Library en repli
+  // (couverture souvent meilleure sur les éditions françaises/petits éditeurs)
+  let info = await fetchFromGoogleBooksByIsbn(isbn);
+  if (!info) info = await fetchFromOpenLibraryByIsbn(isbn);
+  if (!info) return null;
   return {
     isbn,
     title: info.title || 'Titre inconnu',
-    author: (info.authors || []).join(', ') || 'Auteur inconnu',
-    cover: info.imageLinks ? (info.imageLinks.thumbnail || info.imageLinks.smallThumbnail) : ''
+    author: info.author || 'Auteur inconnu',
+    cover: info.cover || ''
   };
 }
 async function searchBooksByTitle(title){
@@ -811,13 +841,32 @@ document.getElementById('startAddScan').addEventListener('click', ()=>{
     document.getElementById('addScanResult').innerHTML = '<p class="hint">Recherche des informations…</p>';
     const info = await fetchBookByIsbn(isbn);
     if (!info) {
-      document.getElementById('addScanResult').innerHTML =
-        `<p class="hint">Aucune information trouvée pour l'ISBN ${isbn}.</p>`;
+      renderManualAddForm(isbn);
       return;
     }
     renderAddPreview(info);
   });
 });
+function renderManualAddForm(isbn){
+  document.getElementById('addScanResult').innerHTML = `
+    <p class="hint">Aucune information trouvée automatiquement pour l'ISBN ${isbn}. Ajoute-le manuellement :</p>
+    <div class="field">
+      <label>Titre</label>
+      <input type="text" id="manualTitle" placeholder="Titre du livre">
+    </div>
+    <div class="field">
+      <label>Auteur</label>
+      <input type="text" id="manualAuthor" placeholder="Auteur (optionnel)">
+    </div>
+    <button class="btn btn-brass" id="manualAddBtn">Ajouter à la bibliothèque</button>`;
+  document.getElementById('manualAddBtn').addEventListener('click', async ()=>{
+    const title = document.getElementById('manualTitle').value.trim();
+    if (!title) return showToast('Entre au moins un titre');
+    const author = document.getElementById('manualAuthor').value.trim() || 'Auteur inconnu';
+    await addBookToLibrary({ isbn, title, author, cover: '' });
+    document.getElementById('addScanResult').innerHTML = '';
+  });
+}
 function renderAddPreview(info){
   document.getElementById('addScanResult').innerHTML = `
     <div class="result-card">
