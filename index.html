@@ -383,7 +383,7 @@ try {
   document.getElementById('configBanner').style.display = 'block';
 }
 
-const APP_VERSION = 2; // Incrémenté à chaque livraison pendant la phase de dev
+const APP_VERSION = 3; // Incrémenté à chaque livraison pendant la phase de dev
 document.getElementById('versionTag').textContent = 'V' + APP_VERSION;
 
 const BOOKS_COL = 'books';
@@ -494,13 +494,30 @@ async function searchBooksByTitle(title){
 }
 
 /* ---------- Scanner (html5-qrcode) ---------- */
+/* Config restreinte aux formats de codes-barres utilisés sur les livres
+   (EAN-13/8 = ISBN, UPC = éditions US/Canada). Cela accélère et fiabilise
+   la détection par rapport à une recherche "tous formats". */
+function getScannerConfig(){
+  return {
+    fps: 10,
+    qrbox: { width: 270, height: 140 },
+    formatsToSupport: [
+      Html5QrcodeSupportedFormats.EAN_13,
+      Html5QrcodeSupportedFormats.EAN_8,
+      Html5QrcodeSupportedFormats.UPC_A,
+      Html5QrcodeSupportedFormats.UPC_E,
+      Html5QrcodeSupportedFormats.CODE_128
+    ],
+    experimentalFeatures: { useBarCodeDetectorIfSupported: true }
+  };
+}
 let scannerInstance = null;
 function startScanner(onDecode){
   const readerEl = document.getElementById('reader');
   readerEl.style.display = 'block';
   readerEl.innerHTML = '';
   scannerInstance = new Html5Qrcode('reader');
-  const config = { fps: 10, qrbox: { width: 240, height: 120 } };
+  const config = getScannerConfig();
   scannerInstance.start({ facingMode: 'environment' }, config, (decodedText)=>{
     stopScanner();
     onDecode(decodedText);
@@ -539,7 +556,7 @@ document.body.appendChild(searchScanOverlay);
 let searchScannerInstance = null;
 document.getElementById('scanSearchBtn').addEventListener('click', ()=>{
   document.getElementById('searchScanOverlay').classList.add('open');
-  const config = { fps: 10, qrbox: { width: 240, height: 120 } };
+  const config = getScannerConfig();
   searchScannerInstance = new Html5Qrcode('searchReader');
   searchScannerInstance.start({ facingMode: 'environment' }, config, (decodedText)=>{
     closeSearchScan();
