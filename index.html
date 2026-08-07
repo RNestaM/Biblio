@@ -127,6 +127,7 @@
   .book .meta{padding:8px 9px 10px;}
   .book .meta .title{font-family:'Fraunces',serif; font-size:13px; font-weight:600; line-height:1.25; margin-bottom:2px;}
   .book .meta .author{font-size:11.5px; color:var(--ink-soft);}
+  .book .meta .isbn{font-size:10px; color:var(--ink-soft); opacity:0.65; margin-top:2px; font-family:'Inter',sans-serif;}
 
   .empty-state{
     margin:40px 16px; text-align:center; color:var(--ink-soft);
@@ -277,7 +278,7 @@
   </header>
 
   <div class="search-row">
-    <input type="text" id="searchInput" placeholder="Rechercher par titre ou auteur…">
+    <input type="text" id="searchInput" placeholder="Titre, auteur ou ISBN…">
     <button class="icon-btn" id="scanSearchBtn" title="Scanner un code-barre">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7V4a1 1 0 0 1 1-1h3M3 17v3a1 1 0 0 0 1 1h3M21 7V4a1 1 0 0 0-1-1h-3M21 17v3a1 1 0 0 1-1 1h-3M7 8v8M11 8v8M14 8v8M17 8v8"/></svg>
     </button>
@@ -384,7 +385,10 @@
       </div>
 
       <div class="tab-panel" id="tab-list">
-        <p class="hint">Appuie sur « Supprimer » pour retirer un livre de la bibliothèque.</p>
+        <p class="hint">Recherche un livre par titre, auteur ou ISBN pour le modifier ou le supprimer.</p>
+        <div class="field">
+          <input type="text" id="manageSearchInput" placeholder="Rechercher par titre, auteur ou ISBN...">
+        </div>
         <button class="btn btn-danger-outline" id="deleteAllBtn" style="margin-bottom:14px;">Vider toute la bibliothèque</button>
         <div id="manageList"></div>
       </div>
@@ -437,7 +441,7 @@ try {
   document.getElementById('configBanner').style.display = 'block';
 }
 
-const APP_VERSION = 25; // Incrémenté à chaque livraison pendant la phase de dev
+const APP_VERSION = 27; // Incrémenté à chaque livraison pendant la phase de dev
 document.getElementById('versionTag').textContent = 'V' + APP_VERSION;
 
 const BOOKS_COL = 'books';
@@ -476,8 +480,13 @@ async function loadBooks(){
 function render(filter='', highlightIsbn=null){
   const grid = document.getElementById('grid');
   const norm = normalize(filter);
+  const isbnTerm = filter.replace(/[^0-9Xx]/g, '');
   const list = norm
-    ? allBooks.filter(b => normalize(b.title).includes(norm) || normalize(b.author).includes(norm))
+    ? allBooks.filter(b =>
+        normalize(b.title).includes(norm) ||
+        normalize(b.author).includes(norm) ||
+        (isbnTerm && b.isbn && b.isbn.includes(isbnTerm))
+      )
     : allBooks;
 
   document.getElementById('bookCount').textContent =
@@ -506,6 +515,7 @@ function render(filter='', highlightIsbn=null){
       <div class="meta">
         <div class="title">${b.title || 'Titre inconnu'}</div>
         <div class="author">${b.author || 'Auteur inconnu'}</div>
+        ${b.isbn ? `<div class="isbn">${b.isbn}</div>` : ''}
       </div>`;
     grid.appendChild(div);
   });
@@ -1000,6 +1010,7 @@ function openManagePanel(){
   renderManageList();
   openOverlay('manageOverlay');
 }
+document.getElementById('manageSearchInput').addEventListener('input', ()=> renderManageList());
 
 /* ---------- Onglets de la modale de gestion ---------- */
 document.querySelectorAll('.tab').forEach(tab=>{
@@ -1488,26 +1499,60 @@ document.getElementById('csvExportBtn').addEventListener('click', ()=>{
 /* ---------- Liste / suppression ---------- */
 function renderManageList(){
   const el = document.getElementById('manageList');
-  if (!allBooks.length){ el.innerHTML = '<p class="hint">Aucun livre pour le moment.</p>'; renderIncompleteList(); return; }
+  const searchInput = document.getElementById('manageSearchInput');
+  const rawTerm = searchInput ? searchInput.value.trim() : '';
+  const normTerm = normalize(rawTerm);
+  const isbnTerm = rawTerm.replace(/[^0-9Xx]/g, '');
+
+  const list = rawTerm
+    ? allBooks.filter(b =>
+        normalize(b.title).includes(normTerm) ||
+        normalize(b.author).includes(normTerm) ||
+        (isbnTerm && b.isbn && b.isbn.includes(isbnTerm))
+      )
+    : allBooks;
+
+  if (!list.length){
+    el.innerHTML = `<p class="hint">${allBooks.length ? 'Aucun livre ne correspond à cette recherche.' : 'Aucun livre pour le moment.'}</p>`;
+    renderIncompleteList();
+    return;
+  }
   el.innerHTML = '';
-  allBooks.forEach(b=>{
+  list.forEach(b=>{
     const row = document.createElement('div');
     row.className = 'manage-row';
+    row.style.cssText = 'flex-direction:column; align-items:stretch;';
     row.innerHTML = `
-      <div class="cover-sm" style="${b.cover ? `background-image:url('${b.cover}')` : ''}"></div>
-      <div class="info">
-        <div class="t">${b.title}</div>
-        <div class="a">${b.author}</div>
+      <div style="display:flex; gap:10px; align-items:center;">
+        <div class="cover-sm" style="${b.cover ? `background-image:url('${b.cover}')` : ''}"></div>
+        <div class="info" style="flex:1;">
+          <div class="t">${b.title}</div>
+          <div class="a">${b.author}</div>
+          ${b.isbn ? `<div class="a" style="margin-top:2px;">ISBN : ${b.isbn}</div>` : ''}
+        </div>
       </div>
-      <button class="del-btn">Supprimer</button>`;
-    row.querySelector('.del-btn').addEventListener('click', async ()=>{
+      <div class="btn-row" style="margin-top:8px;">
+        <button class="btn btn-outline edit-manage-btn">Modifier</button>
+        <button class="btn btn-danger-outline del-manage-btn">Supprimer</button>
+      </div>
+      <div class="edit-form" style="display:none; margin-top:10px;"></div>`;
+    el.appendChild(row);
+
+    row.querySelector('.del-manage-btn').addEventListener('click', async ()=>{
       if (!confirm(`Supprimer « ${b.title} » ?`)) return;
       await db.collection(BOOKS_COL).doc(b.id).delete();
       showToast("Livre supprimé");
       await loadBooks();
       renderManageList();
     });
-    el.appendChild(row);
+    row.querySelector('.edit-manage-btn').addEventListener('click', ()=>{
+      const formEl = row.querySelector('.edit-form');
+      const wasOpen = formEl.style.display !== 'none';
+      document.querySelectorAll('.edit-form').forEach(f => f.style.display = 'none');
+      if (wasOpen){ formEl.style.display = 'none'; return; }
+      formEl.style.display = 'block';
+      attachEditForm(formEl, b);
+    });
   });
   renderIncompleteList();
 }
@@ -1575,69 +1620,75 @@ function renderIncompleteList(){
     card.querySelector('.edit-incomplete-btn').addEventListener('click', ()=>{
       const formEl = card.querySelector('.edit-form');
       const wasOpen = formEl.style.display !== 'none';
-      document.querySelectorAll('#incompleteList .edit-form').forEach(f => f.style.display = 'none');
+      document.querySelectorAll('.edit-form').forEach(f => f.style.display = 'none');
       if (wasOpen){ formEl.style.display = 'none'; return; }
       formEl.style.display = 'block';
-      formEl.innerHTML = `
-        <div class="field">
-          <label>Titre</label>
-          <input type="text" class="edit-title" value="${escapeHtmlAttrIncomplete(b.title === 'Titre inconnu' ? '' : b.title)}" placeholder="Titre du livre">
-        </div>
-        <div class="field">
-          <label>Auteur</label>
-          <input type="text" class="edit-author" value="${escapeHtmlAttrIncomplete(b.author === 'Auteur inconnu' ? '' : b.author)}" placeholder="Auteur">
-        </div>
-        <div class="field">
-          <label>Couverture — URL de l'image</label>
-          <input type="text" class="edit-cover-url" placeholder="https://...">
-        </div>
-        <div class="field">
-          <label>Ou importer une image depuis ton appareil</label>
-          <input type="file" class="edit-cover-file" accept="image/*">
-        </div>
-        <p class="hint">L'image importée est redimensionnée automatiquement (elle est stockée directement dans la fiche du livre).</p>
-        <div class="btn-row">
-          <button class="btn btn-brass save-incomplete-btn">Enregistrer</button>
-          <button class="btn btn-outline cancel-incomplete-btn">Annuler</button>
-        </div>`;
-      formEl.querySelector('.cancel-incomplete-btn').addEventListener('click', ()=>{ formEl.style.display = 'none'; });
-      formEl.querySelector('.save-incomplete-btn').addEventListener('click', async ()=>{
-        const titleVal = formEl.querySelector('.edit-title').value.trim();
-        const authorVal = formEl.querySelector('.edit-author').value.trim();
-        const coverUrlVal = formEl.querySelector('.edit-cover-url').value.trim();
-        const fileInput = formEl.querySelector('.edit-cover-file');
-        const saveBtn = formEl.querySelector('.save-incomplete-btn');
-
-        const updates = {};
-        if (titleVal) updates.title = titleVal;
-        if (authorVal) updates.author = authorVal;
-
-        saveBtn.disabled = true;
-        saveBtn.textContent = 'Enregistrement…';
-        try {
-          if (fileInput.files && fileInput.files[0]){
-            updates.cover = await resizeImageToDataUrl(fileInput.files[0], 300, 0.72);
-          } else if (coverUrlVal){
-            updates.cover = coverUrlVal;
-          }
-          if (!Object.keys(updates).length){
-            showToast('Rien à enregistrer');
-            saveBtn.disabled = false;
-            saveBtn.textContent = 'Enregistrer';
-            return;
-          }
-          await db.collection(BOOKS_COL).doc(b.id).update(updates);
-          showToast('Livre mis à jour');
-          await loadBooks();
-          renderManageList();
-        } catch(e){
-          console.error(e);
-          showToast("Erreur lors de l'enregistrement (image trop grande ?)");
-          saveBtn.disabled = false;
-          saveBtn.textContent = 'Enregistrer';
-        }
-      });
+      attachEditForm(formEl, b);
     });
+  });
+}
+
+/* Formulaire d'édition partagé (titre / auteur / couverture par URL ou import),
+   utilisé à la fois par l'onglet "Incomplets" et l'onglet "Livres". */
+function attachEditForm(formEl, book){
+  formEl.innerHTML = `
+    <div class="field">
+      <label>Titre</label>
+      <input type="text" class="edit-title" value="${escapeHtmlAttrIncomplete(book.title && book.title !== 'Titre inconnu' && !book.title.startsWith('Non identifié') ? book.title : '')}" placeholder="Titre du livre">
+    </div>
+    <div class="field">
+      <label>Auteur</label>
+      <input type="text" class="edit-author" value="${escapeHtmlAttrIncomplete(book.author && book.author !== 'Auteur inconnu' ? book.author : '')}" placeholder="Auteur">
+    </div>
+    <div class="field">
+      <label>Couverture — URL de l'image</label>
+      <input type="text" class="edit-cover-url" placeholder="https://...">
+    </div>
+    <div class="field">
+      <label>Ou importer une image depuis ton appareil</label>
+      <input type="file" class="edit-cover-file" accept="image/*">
+    </div>
+    <p class="hint">L'image importée est redimensionnée automatiquement (elle est stockée directement dans la fiche du livre).</p>
+    <div class="btn-row">
+      <button class="btn btn-brass save-edit-btn">Enregistrer</button>
+      <button class="btn btn-outline cancel-edit-btn">Annuler</button>
+    </div>`;
+  formEl.querySelector('.cancel-edit-btn').addEventListener('click', ()=>{ formEl.style.display = 'none'; });
+  formEl.querySelector('.save-edit-btn').addEventListener('click', async ()=>{
+    const titleVal = formEl.querySelector('.edit-title').value.trim();
+    const authorVal = formEl.querySelector('.edit-author').value.trim();
+    const coverUrlVal = formEl.querySelector('.edit-cover-url').value.trim();
+    const fileInput = formEl.querySelector('.edit-cover-file');
+    const saveBtn = formEl.querySelector('.save-edit-btn');
+
+    const updates = {};
+    if (titleVal) updates.title = titleVal;
+    if (authorVal) updates.author = authorVal;
+
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Enregistrement…';
+    try {
+      if (fileInput.files && fileInput.files[0]){
+        updates.cover = await resizeImageToDataUrl(fileInput.files[0], 300, 0.72);
+      } else if (coverUrlVal){
+        updates.cover = coverUrlVal;
+      }
+      if (!Object.keys(updates).length){
+        showToast('Rien à enregistrer');
+        saveBtn.disabled = false;
+        saveBtn.textContent = 'Enregistrer';
+        return;
+      }
+      await db.collection(BOOKS_COL).doc(book.id).update(updates);
+      showToast('Livre mis à jour');
+      await loadBooks();
+      renderManageList();
+    } catch(e){
+      console.error(e);
+      showToast("Erreur lors de l'enregistrement (image trop grande ?)");
+      saveBtn.disabled = false;
+      saveBtn.textContent = 'Enregistrer';
+    }
   });
 }
 
