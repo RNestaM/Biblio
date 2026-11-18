@@ -268,6 +268,7 @@
 
 <div id="configBanner" class="config-banner" style="display:none;">
   ⚠️ Firebase n'est pas encore configuré. Renseigne ton objet <code>firebaseConfig</code> dans le code (recherche <code>VOTRE_API_KEY</code>).
+  <span id="configBannerDetail"></span>
 </div>
 
 <div class="app">
@@ -429,6 +430,9 @@ const firebaseConfig = {
 let db = null;
 let firebaseReady = false;
 try {
+  if (typeof firebase === 'undefined') {
+    throw new Error("Le SDK Firebase (gstatic.com) ne s'est pas chargé — vérifie ta connexion ou un bloqueur de script.");
+  }
   if (firebaseConfig.apiKey !== "VOTRE_API_KEY") {
     firebase.initializeApp(firebaseConfig);
     db = firebase.firestore();
@@ -438,6 +442,8 @@ try {
   }
 } catch (e) {
   console.error(e);
+  const detail = document.getElementById('configBannerDetail');
+  if (detail) detail.textContent = ' Détail : ' + (e && e.message ? e.message : e);
   document.getElementById('configBanner').style.display = 'block';
 }
 
